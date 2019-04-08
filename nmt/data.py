@@ -17,13 +17,11 @@ from torchtext.data import Field, BucketIterator
 def setup_data_args(parser):
     """"""
     parser.add_argument(
-        '-bs',
         '--batch_size',
         type=int,
         default=128,
         help='Size of the batches during training.')
     parser.add_argument(
-        '-d',
         '--data_dir',
         type=str,
         default=join(abspath(dirname(__file__)), '..', 'data'),

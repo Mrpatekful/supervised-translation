@@ -8,6 +8,10 @@
 """
 
 
+def setup_eval_args(parser):
+    pass
+
+
 def main():
     pass
 
