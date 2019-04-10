@@ -14,6 +14,10 @@ from torchtext.datasets import Multi30k
 from torchtext.data import Field, BucketIterator
 
 
+START_TOKEN = '<sos>'
+END_TOKEN = '<eos>'
+
+
 def setup_data_args(parser):
     """"""
     parser.add_argument(
@@ -26,6 +30,11 @@ def setup_data_args(parser):
         type=str,
         default=join(abspath(dirname(__file__)), '..', 'data'),
         help='Path of the data root directory.')
+    parser.add_argument(
+        '--vocab_size',
+        type=int,
+        default=20000,
+        help='Maximum size of the vocabulary.')
     
 
 def tokenize(sentence, tokenizer):
@@ -40,13 +49,16 @@ def create_datasets(args):
 
     english = Field(
         # tokenize=lambda s: tokenize(s, src_lang.tokenizer),
-        batch_first=True)
+        batch_first=True,
+        include_lengths=True)
 
     german = Field(
         # tokenize=lambda s: tokenize(s, tgt_lang.tokenizer), 
-        init_token = "<sos>", 
-        eos_token = "<eos>",
-        batch_first=True)
+        init_token = START_TOKEN, 
+        eos_token = END_TOKEN,
+        batch_first=True,
+        include_lengths=True,
+        is_target=True)
 
     train, val, test = Multi30k.splits(
         exts=('.en', '.de'),
@@ -57,7 +69,7 @@ def create_datasets(args):
         (train, val, test), batch_sizes=[args.batch_size] * 3,
         sort_key=lambda x: len(x.src), device=0)
 
-    english.build_vocab()
-    german.build_vocab()
-    
-    return iterators
+    english.build_vocab(train, val, max_size=args.vocab_size)
+    german.build_vocab(train, val, max_size=args.vocab_size)
+
+    return iterators, (len(english.vocab), len(german.vocab))

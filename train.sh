@@ -1,13 +1,12 @@
 #!/bin/bash
 
-MODEL=${1:-seq2seq}
-DATA_DIR=${2:-"/home/patrik/Data/nlp/nmt"}
+DATA_DIR=${1:-"/home/patrik/Data/nlp/nmt"}
 
 MODEL_DIR=$(dirname "$0")/model/$MODEL
 MODEL_FILE=${3:-$MODEL_DIR/"model"}
 
-mkdir -p $(dirname "$0")/../checkpoints
+mkdir -p $(dirname "$0")/checkpoints
 mkdir -p $MODEL_DIR
 
-python $(dirname "$0")/nmt/train.py --model $MODEL \
+python $(dirname "$0")/nmt/train.py --model_dir $MODEL_DIR \
                                     --data_dir $DATA_DIR

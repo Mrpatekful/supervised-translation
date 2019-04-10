@@ -14,6 +14,5 @@ def setup_beam_args(parser):
     parser.add_argument('')
 
 
-@torch.no_grad()
-def beam_search_decode(model, batch):
+def decode_beam_search(model, inputs):
     return batch

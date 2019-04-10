@@ -9,11 +9,16 @@
 
 
 def setup_eval_args(parser):
-    pass
+    parser.add_argument(
+        '--input_dir', 
+        type=str,
+        )
 
 
 def main():
     pass
+    
+
 
 
 if __name__ == '__main__':
