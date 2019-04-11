@@ -38,7 +38,7 @@ def setup_train_args():
     parser.add_argument(
         '--cuda',
         type=bool,
-        default=False,
+        default=torch.cuda.is_available(),
         help='Device for training.')
     parser.add_argument(
         '--learning_rate',
@@ -58,18 +58,29 @@ def create_optimizer(args, parameters):
     return Adam(lr=args.learning_rate, params=parameters)
 
 
-def compute_loss(inputs, targets, criterion):
-    pass
+def compute_loss(outputs, targets, criterion, pad_token):
+    """"""
+    scores, preds = outputs
+
+    scores_view = scores.view(-1, scores.size(-1))
+    targets_view = targets.view(-1)
+    loss = criterion(scores_view, targets_view)
+    
+    notnull = targets.ne(pad_token)
+    target_tokens = notnull.long().sum().item()
+    print(targets.size(), preds.size(), notnull.size())
+    correct = ((targets == preds) * notnull).sum().item()
+
+    return loss
 
 
-def train_step(model, criterion, optimizer, batch):
+def train_step(model, criterion, optimizer, batch, pad_token):
     """"""
     optimizer.zero_grad()
 
-    inputs, input_lengths = batch.src
-    targets, target_lengths = batch.trg
+    inputs, targets = batch.src, batch.trg
 
-    outputs = model(inputs=inputs, targets=targets)
+    outputs = model(inputs=inputs, max_len=targets.size(1))
     # Applying teacher forcing 50% of the time.
     # if random.random() > 0.5:
     #     outputs = model(inputs=inputs)
@@ -77,36 +88,47 @@ def train_step(model, criterion, optimizer, batch):
     # else:
     #     outputs = model(inputs=inputs, targets=targets)
 
-    # loss = compute_loss(outputs)
-    # loss.backward()
+    loss = compute_loss(
+        outputs=outputs, 
+        targets=targets, 
+        criterion=criterion,
+        pad_token=pad_token)
+
+    loss.backward()
 
     optimizer.step()
 
+    return loss
 
-def eval_step(model, criterion, batch, use_beam_search=False):
+
+def eval_step(model, criterion, batch, pad_token, 
+              use_beam_search=False):
     """"""
-    inputs, input_lengths = batch.src
-    targets, target_lengths = batch.trg
+    inputs, targets = batch.src, batch.trg
 
     if use_beam_search:
-        preds, scores = decode_beam_search(model=model, inputs=inputs)
+        outputs = decode_beam_search(model=model, inputs=inputs)
 
     else:
-        preds, scores = model(inputs=inputs)
+        outputs = model(inputs=inputs)
+
+    loss = compute_loss(
+        outputs=outputs, 
+        targets=targets, 
+        criterion=criterion,
+        pad_token=pad_token)
+
+    return loss
 
 
-def log_results(results):
-    """"""
-
-
-def train(model, datasets, args):
+def train(model, datasets, pad_token, args):
     """"""
     device = torch.device(  # pylint: disable=no-member
         'cuda' if args.cuda else 'cpu') 
     model.to(device)
 
-    train, val, test = datasets
-    criterion = create_criterion(args)
+    train, valid, test = datasets
+    criterion = create_criterion(args, pad_token)
     optimizer = create_optimizer(args, model.parameters())
 
     for epoch_idx in range(args.epochs):
@@ -119,43 +141,52 @@ def train(model, datasets, args):
                 results = train_step(
                     model=model, 
                     criterion=criterion, 
-                    optimizer=optimizer, 
+                    optimizer=optimizer,
+                    pad_token=pad_token, 
                     batch=batch)
-
-                log_results(results=results)
 
                 pbar.set_postfix()
                 pbar.update()
 
-        with tqdm(total=len(val)) as pbar:
+        with tqdm(total=len(valid)) as pbar:
             pbar.set_description('epoch {}'.format(epoch_idx))
             model.eval()
 
             with torch.no_grad():
-                for batch in val:
+                for batch in valid:
                     results = eval_step(
                         model=model,
                         criterion=criterion,
+                        pad_token=pad_token,
                         batch=batch)
-
-                    log_results(results=results)
 
                     pbar.set_postfix()
                     pbar.update()
 
-    with torch.no_grad():
-        model.eval()
-        for batch in test:
-            _ = beam_search_decode(model, batch)
+    with tqdm(total=len(test)) as pbar:
+        with torch.no_grad():
+            model.eval()
+            for batch in test:
+                results = eval_step(
+                    model=model,
+                    criterion=criterion,
+                    pad_token=pad_token,
+                    use_beam_search=True,
+                    batch=batch)
+                
+                pbar.set_postfix()
+                pbar.update()
             
 
 def main():
     args = setup_train_args()
 
-    datasets, vocab_sizes = create_datasets(args)
-    model = create_model(args, vocab_sizes)
+    datasets, vocab_sizes, tokens = create_datasets(args)
+    pad_token, start_token, end_token = tokens
+    
+    model = create_model(args, vocab_sizes, (start_token, end_token))
 
-    train(model, datasets, args)
+    train(model, datasets, pad_token, args)
 
 
 if __name__ == '__main__':
