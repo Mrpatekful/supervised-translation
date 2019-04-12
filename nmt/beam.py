@@ -11,8 +11,13 @@ import torch
 
 
 def setup_beam_args(parser):
-    parser.add_argument('')
+    parser.add_argument(
+        '--beam_width',
+        type=int,
+        default=3,
+        help='Number of beam segments.')
 
 
-def decode_beam_search(model, inputs):
-    return batch
+def decode_beam_search(model, inputs, max_len=50):
+    # TODO implement beam search
+    return inputs

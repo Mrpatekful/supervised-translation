@@ -10,7 +10,7 @@
 
 def setup_eval_args(parser):
     parser.add_argument(
-        '--input_dir', 
+        '--model_state', 
         type=str,
         )
 

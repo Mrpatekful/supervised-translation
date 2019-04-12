@@ -24,11 +24,6 @@ from torch.nn import (
 def setup_model_args(parser):
     """"""
     parser.add_argument(
-        '--model_dir',
-        type=str,
-        default=None,
-        help='Path of the model checkpoints.')
-    parser.add_argument(
         '--hidden_size',
         type=int,
         default=128,
@@ -45,20 +40,31 @@ def setup_model_args(parser):
         help='Set the batch dimension as first.')
 
 
-def create_model(args, vocab_sizes, tokens):
+def create_model(args, vocab_sizes, indices, device):
     """"""
     source_vocab_size, target_vocab_size = vocab_sizes
 
-    return Seq2Seq(
+    start_index, end_index = indices
+    start_index = torch.tensor(start_index) # pylint: disable=not-callable
+    start_index.to(device)
+
+    end_index = torch.tensor(end_index) # pylint: disable=not-callable
+    end_index.to(device)
+
+    model = Seq2Seq(
         source_vocab_size=source_vocab_size, 
         target_vocab_size=target_vocab_size,
-        tokens=tokens,
+        indices=(start_index, end_index),
         **vars(args))
 
+    model.to(device)
 
-def create_criterion(args, pad_token):
+    return model
+
+
+def create_criterion(args, pad_index):
     """"""
-    return CrossEntropyLoss(ignore_index=pad_token, reduction='sum')
+    return CrossEntropyLoss(ignore_index=pad_index, reduction='sum')
 
 
 class Seq2Seq(Module):
@@ -67,7 +73,7 @@ class Seq2Seq(Module):
     def __init__(self, embedding_size, 
                  hidden_size, batch_first, 
                  source_vocab_size, target_vocab_size, 
-                 tokens, **kwargs):
+                 indices, **kwargs):
         super().__init__()
 
         self.encoder = Encoder(
@@ -82,19 +88,17 @@ class Seq2Seq(Module):
             vocab_size=target_vocab_size,
             batch_first=batch_first)
 
-        start_token, end_token = tokens
+        start_index, end_index = indices
 
-        self.START_INDEX = torch.tensor(start_token) # pylint: disable=not-callable
-        self.END_INDEX = torch.tensor(end_token) # pylint: disable=not-callable
+        self.START_INDEX = start_index
+        self.END_INDEX = end_index
 
     def forward(self, inputs, targets=None, max_len=50):
         """"""
         encoder_outputs, encoder_hidden = self.encoder(inputs)
-
         if targets is None:
             scores, preds = self.decode_greedy(
                 encoder_outputs, encoder_hidden, max_len)
-        
         else:
             scores, preds = self.decode_forced(
                 targets, encoder_outputs, encoder_hidden)
@@ -107,14 +111,13 @@ class Seq2Seq(Module):
         preds = self.START_INDEX.detach().expand(batch_size, 1)
         scores = []
 
-        hidden_state = None
+        hidden_state = encoder_hidden
 
         for _ in range(max_len):
             step_output, hidden_state = self.decoder(
-                inputs=preds, 
+                inputs=preds[:, -1:], 
                 encoder_outputs=encoder_outputs,
-                encoder_hidden=encoder_hidden,
-                previous_hidden_state=hidden_state)
+                hidden_state=hidden_state)
 
             step_output = step_output[:, -1:, :]
             step_scores = log_softmax(step_output, dim=2)
@@ -128,7 +131,7 @@ class Seq2Seq(Module):
             all_finished = (
                 (preds == self.END_INDEX)
                 .sum(dim=1) > 0).sum().item() == batch_size
-            if all_finished:
+            if all_finished and not self.training:
                 break
             
         scores = torch.cat(scores, 1) # pylint: disable=no-member
@@ -203,28 +206,19 @@ class Decoder(Module):
         self.attention_layer = Attention(
             hidden_size=hidden_size)
         
-    def forward(self, inputs, encoder_outputs, encoder_hidden,
-                previous_hidden_state=None):
-        """"""
-        if previous_hidden_state is None:
-            hidden_state = encoder_hidden
-
-        else:
-            hidden_state = previous_hidden_state
-            inputs = inputs[:, -1:]
-
-        seq_len = inputs.size(1)
-
+    def forward(self, inputs, encoder_outputs, hidden_state):
+        """"""       
         outputs = []
+        sequence_length = inputs.size(1)
         embedded_inputs = self.embedding_layer(inputs)
 
-        for step in range(seq_len):
+        for step in range(sequence_length):
             step_output, hidden_state = self.recurrent_layer(
                 embedded_inputs[:, step, :].unsqueeze(1), 
                 hidden_state)
-            step_output = self.attention_layer(
+            step_output, _ = self.attention_layer(
                 decoder_output=step_output, 
-                hidden_state=hidden_state, 
+                last_hidden=hidden_state, 
                 encoder_outputs=encoder_outputs)
 
             outputs.append(step_output)
@@ -252,26 +246,24 @@ class Attention(Module):
             in_features=hidden_size * 3,
             out_features=hidden_size)        
 
-    def forward(self, decoder_output, hidden_state, encoder_outputs):
+    def forward(self, decoder_output, last_hidden, encoder_outputs):
         """"""
         # Transforming hidden state to the correct dimension
-        hidden_state = hidden_state[0][-1].unsqueeze(1)
-        hidden_state = self.attention_layer(hidden_state)
-
+        last_hidden = last_hidden[0][-1].unsqueeze(1)
+        last_hidden = self.attention_layer(last_hidden)
         encoder_outputs_transpose = encoder_outputs.transpose(1, 2)
-        attention_weights = torch.bmm( # pylint: disable=no-member
-            hidden_state, 
-            encoder_outputs_transpose).squeeze(1)
 
+        attention_weights = torch.bmm( # pylint: disable=no-member
+            last_hidden, 
+            encoder_outputs_transpose).squeeze(1)
         attention_applied = torch.bmm( # pylint: disable=no-member
             attention_weights.unsqueeze(1), 
             encoder_outputs)
 
         merged = torch.cat( # pylint: disable=no-member
             (decoder_output.squeeze(1), 
-            attention_applied.squeeze(1)), 1)
-
+            attention_applied.squeeze(1)), dim=1)
         output = torch.tanh( # pylint: disable=no-member
             self.combine_layer(merged).unsqueeze(1))
 
-        return output
+        return output, attention_weights

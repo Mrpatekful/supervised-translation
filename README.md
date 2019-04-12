@@ -1,6 +1,6 @@
 # Neural machine translation
 
-Implementation of supervised neural machine translation on Multi30K dataset with Sequence-to-Sequence architecture and attention mechanism in PyTorch.
+Implementation of supervised neural machine translation on Multi30K dataset with **`seq2seq`** architecture, **`attention`** and **`beam search`** in PyTorch. For data loading I utilise the [TorchText](https://github.com/pytorch/text) library.
 
 ## Techniques
 
