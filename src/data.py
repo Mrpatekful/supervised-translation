@@ -1,7 +1,7 @@
 """
 
 @author:    Patrik Purgai
-@copyright: Copyright 2019, rlchat
+@copyright: Copyright 2019, nmt
 @license:   MIT
 @email:     purgai.patrik@gmail.com
 @date:      2019.04.04.
@@ -17,6 +17,7 @@ from nltk.translate import bleu
 
 START_TOKEN = '<sos>'
 END_TOKEN = '<eos>'
+PAD_TOKEN = '<pad>'
 
 
 def setup_data_args(parser):
@@ -43,16 +44,12 @@ def tokenize(sentence, tokenizer):
     return [tok.text for tok in tokenizer(sentence)]
 
 
-def vec2text(vec, field):
-    """"""
-    return ' '.join(field.vocab.itos.get(n) for n in vec.item())
-
-
 def create_datasets(args, device):
     """"""
-    english = Field(
+    src = Field(
         batch_first=True)
-    german = Field(
+
+    trg = Field(
         init_token=START_TOKEN, 
         eos_token=END_TOKEN,
         batch_first=True,
@@ -60,22 +57,29 @@ def create_datasets(args, device):
 
     train, valid, test = Multi30k.splits(
         exts=('.en', '.de'),
-        fields=(english, german),
+        fields=(src, trg),
         root=args.data_dir)
 
-    english.build_vocab(train, valid, max_size=args.vocab_size)
-    german.build_vocab(train, valid, max_size=args.vocab_size)
+    src.build_vocab(train, valid, max_size=args.vocab_size)
+    trg.build_vocab(train, valid, max_size=args.vocab_size)
 
-    src_pad_token = english.vocab.stoi['<pad>']
-    trg_pad_token = german.vocab.stoi['<pad>']
-    start_token = german.vocab.stoi[START_TOKEN]
-    end_token = german.vocab.stoi[END_TOKEN]
-
-    tokens = (src_pad_token, trg_pad_token), start_token, end_token
-    vocab_sizes = len(english.vocab), len(german.vocab)
+    vocabs = src.vocab, trg.vocab
 
     iterators = BucketIterator.splits(
         (train, valid, test), batch_sizes=[args.batch_size] * 3,
         sort_key=lambda x: len(x.src), device=device)
 
-    return iterators, vocab_sizes, tokens
+    return iterators, vocabs
+
+
+def get_indices(vocabs):
+    """"""
+    src_vocab, trg_vocab = vocabs
+
+    start_index = trg_vocab.stoi[START_TOKEN]
+    end_index = trg_vocab.stoi[END_TOKEN]
+
+    src_pad_index = src_vocab.stoi[PAD_TOKEN]
+    trg_pad_index = trg_vocab.stoi[PAD_TOKEN]
+
+    return start_index, end_index, src_pad_index, trg_pad_index
