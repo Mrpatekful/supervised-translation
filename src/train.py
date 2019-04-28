@@ -20,26 +20,34 @@ import os
 import numpy as np
 
 from os.path import exists, join, dirname, abspath
-from datetime import datetime
 from torch.optim import Adam
+
 from datetime import datetime
 from tqdm import tqdm
 from collections import OrderedDict
-from data import create_datasets, setup_data_args, get_indices
+
+from data import (
+    create_datasets, 
+    setup_data_args, 
+    get_special_indices)
 
 from model import (
     create_model, 
     create_criterion,
     setup_model_args)
 
-from beam import beam_search, setup_beam_args
+from beam import (
+    beam_search, 
+    setup_beam_args)
 
 
-project_dir = join(abspath(dirname(__file__)), '..')
+PROJECT_DIR = join(abspath(dirname(__file__)), '..')
 
 
 def setup_train_args():
-    """"""
+    """
+    Sets up the training arguments.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--epochs',
@@ -59,7 +67,7 @@ def setup_train_args():
     parser.add_argument(
         '--model_dir',
         type=str,
-        default=join(project_dir, 'model.{}'.format(
+        default=join(PROJECT_DIR, 'model.{}'.format(
             datetime.today().strftime('%j%H%m'))),
         help='Path of the model checkpoints.')
 
@@ -71,32 +79,45 @@ def setup_train_args():
 
 
 def save_state(model, optimizer, path):
-    """"""
+    """
+    Saves the model and optimizer state.
+    """
+    model_path = join(path, 'model.pt')
     state = {
         'model': model.state_dict(),
         'optimizer': optimizer.state_dict(),
     }
-    torch.save(state, join(path, 'model.pt'))
+    torch.save(state, model_path)
+    print('Saving model to {}'.format(model_path))
 
 
 def load_state(model, optimizer, path):
-    """"""
+    """
+    Loads the model and optimizer state.
+    """
     try:
-        state = torch.load(join(path, 'model.pt'))
+        model_path = join(path, 'model.pt')
+        state = torch.load(model_path)
 
         model.load_state_dict(state['model'])
         optimizer.load_state_dict(state['optimizer'])
+        print('Loading model from {}'.format(model_path))
     except FileNotFoundError:
         pass
 
+
 def create_optimizer(args, parameters):
-    """"""
+    """
+    Creates an ADAM optimizer.
+    """
     optimizer = Adam(lr=args.learning_rate, params=parameters)
     return optimizer
 
 
 def compute_loss(outputs, targets, criterion, pad_index):
-    """"""
+    """
+    Computes the loss and accuracy with masking.
+    """
     scores, preds = outputs
 
     scores_view = scores.view(-1, scores.size(-1))
@@ -114,7 +135,9 @@ def compute_loss(outputs, targets, criterion, pad_index):
 
 
 def train_step(model, criterion, optimizer, batch, indices):
-    """"""
+    """
+    Performs a single step of training.
+    """
     optimizer.zero_grad()
 
     _, trg_pad_index, _, _ = indices
@@ -125,7 +148,8 @@ def train_step(model, criterion, optimizer, batch, indices):
     if random.random() > 0.5:
         outputs = model(inputs=inputs, max_len=max_len)
     else:
-        outputs = model(inputs=inputs, targets=targets, max_len=max_len)
+        outputs = model(inputs=inputs, targets=targets, 
+                        max_len=max_len)
 
     loss, accuracy = compute_loss(
         outputs=outputs, 
@@ -141,10 +165,12 @@ def train_step(model, criterion, optimizer, batch, indices):
 
 
 def eval_step(model, criterion, batch, indices, device, beam_size):
-    """"""
+    """
+    Performs a single step of evaluation.
+    """
     inputs, targets = batch.src, batch.trg
     src_pad_index, trg_pad_index, _, _ = indices
-
+    
     if beam_size > 1:
         outputs = beam_search(
             model=model, 
@@ -154,7 +180,7 @@ def eval_step(model, criterion, batch, indices, device, beam_size):
             device=device,
             max_len=targets.size(1))
     else:
-        outputs = model(nputs=inputs, max_len=targets.size(1))
+        outputs = model(inputs=inputs, max_len=targets.size(1))
 
     scores, preds = outputs
     batch_size, sequence_length = targets.size()
@@ -180,7 +206,9 @@ def eval_step(model, criterion, batch, indices, device, beam_size):
 
 
 def train(model, datasets, indices, args, device):
-    """"""
+    """
+    Performs training, validation and testing.
+    """
     src_pad_index, trg_pad_index, _, _ = indices
     src_pad_index = torch.tensor(src_pad_index)
     src_pad_index.to(device)
@@ -191,46 +219,45 @@ def train(model, datasets, indices, args, device):
 
     load_state(model, optimizer, args.model_dir)
 
-    # for epoch in range(args.epochs):
+    for epoch in range(args.epochs):
 
-    #     # Running training loop.
-    #     with tqdm(total=len(train)) as pbar:
-    #         pbar.set_description('epoch {}'.format(epoch))
-    #         model.train()
+        # Running training loop.
+        with tqdm(total=len(train)) as pbar:
+            pbar.set_description('epoch {}'.format(epoch))
+            model.train()
 
-    #         for batch in train:
-    #             loss, accuracy = train_step(
-    #                 model=model, 
-    #                 criterion=criterion, 
-    #                 optimizer=optimizer,
-    #                 indices=indices, 
-    #                 batch=batch)
+            for batch in train:
+                loss, accuracy = train_step(
+                    model=model, 
+                    criterion=criterion, 
+                    optimizer=optimizer,
+                    indices=indices, 
+                    batch=batch)
 
-    #             pbar.set_postfix(ordered_dict=OrderedDict(
-    #                 loss=loss, acc=accuracy))
-    #             pbar.update()
+                pbar.set_postfix(ordered_dict=OrderedDict(
+                    loss=loss, acc=accuracy))
+                pbar.update()
 
-    #     # Running validation loop.
-    #     with tqdm(total=len(valid)) as pbar:
-    #         pbar.set_description('validation')
-    #         model.eval()
+        # Running validation loop.
+        with tqdm(total=len(valid)) as pbar:
+            pbar.set_description('validation')
+            model.eval()
 
-    #         with torch.no_grad():
-    #             for batch in valid:
-    #                 loss, accuracy = eval_step(
-    #                     model=model,
-    #                     criterion=criterion,
-    #                     indices=indices,
-    #                     device=device,
-    #                     beam_size=1,
-    #                     batch=batch)
+            with torch.no_grad():
+                for batch in valid:
+                    loss, accuracy = eval_step(
+                        model=model,
+                        criterion=criterion,
+                        indices=indices,
+                        device=device,
+                        beam_size=1,
+                        batch=batch)
                 
-    #                 avg_loss += loss
-    #                 pbar.set_postfix(ordered_dict=OrderedDict(
-    #                     loss=loss, acc=accuracy))
-    #                 pbar.update()
+                    pbar.set_postfix(ordered_dict=OrderedDict(
+                        loss=loss, acc=accuracy))
+                    pbar.update()
 
-    #     save_state(model, optimizer, args.model_dir)
+        save_state(model, optimizer, args.model_dir)
 
     # Running testing loop.
     with tqdm(total=len(test)) as pbar:
@@ -257,9 +284,8 @@ def main():
     device = torch.device('cuda' if args.cuda else 'cpu') 
 
     datasets, vocabs = create_datasets(args, device)
+    indices = get_special_indices(vocabs)
 
-    indices = get_indices(vocabs)
-    
     model = create_model(args, vocabs, indices, device)
 
     train(model, datasets, indices, args, device)

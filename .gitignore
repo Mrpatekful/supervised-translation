@@ -107,4 +107,5 @@ venv.bak/
 
 .model/
 .data/
-
+model/
+data/
