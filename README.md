@@ -2,7 +2,7 @@
 
 Minimalist implementation of supervised neural machine translation on Multi30K dataset with seq2seq architecture, attention meachanism and beam search in PyTorch. For data loading I utilise the [TorchText](https://github.com/pytorch/text) library.
 
-## Techniques
+## References
 
 - **[Sequence to Sequence Learning with Neural Networks](https://arxiv.org/abs/1409.3215)**
 

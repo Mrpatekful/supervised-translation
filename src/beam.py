@@ -16,12 +16,9 @@ import math
 from torch.nn.functional import log_softmax
 from collections import namedtuple
 
-
 NEAR_INF = 1e20
-NEAR_INF_FP16 = 65504
 
-
-Hypothesis = namedtuple('Hypothesis', ['hyp_id', 'timestep', 'score'])
+Hypothesis = namedtuple('Hypothesis', ['hyp_id', 'time_step', 'score'])
 
 
 def setup_beam_args(parser):
@@ -39,10 +36,7 @@ def neginf(dtype):
     """
     Represents the negative infinity for the dtype.
     """
-    if dtype is torch.float16:
-        return -NEAR_INF_FP16
-    else:
-        return -NEAR_INF
+    return -NEAR_INF
 
 
 def create_beams(*args, batch_size, **kwargs):
@@ -108,15 +102,15 @@ def beam_search(model, inputs, indices, beam_size, device,
 
         # each beam receives the corresponding score
         # output, to calculate the best candidates
-        for index, beam in enumerate(beams):
+        for idx, beam in enumerate(beams):
             if not beam.finished:
-                beam.step(scores[index])
+                beam.step(scores[idx])
 
         # prepares the indices, which select the hidden states
         # of the best scoring outputs
         indices = torch.cat([
-            beam_size * i + b.hyp_ids[-1] 
-            for i, b in enumerate(beams)
+            beam_size * idx + beam.hyp_ids[-1] 
+            for idx, beam in enumerate(beams)
         ])
 
         hidden_state = select_hidden_states(hidden_state, indices)
@@ -126,14 +120,7 @@ def beam_search(model, inputs, indices, beam_size, device,
         prev_output = prev_output.unsqueeze(-1)
         decoder_input = torch.cat([decoder_input, prev_output], dim=-1)
 
-    top_preds, top_scores = [], []
-    for beam in beams:
-        preds, scores = beam.get_result()
-        top_preds.append(preds)
-        top_scores.append(scores)
-
-    top_preds = torch.cat(top_preds, dim=-1)
-    top_scores = torch.cat(top_scores, dim=-1)
+    top_preds, top_scores = beam.get_result()
 
     return top_preds, top_scores 
 
@@ -170,7 +157,8 @@ class Beam:
     def step(self, scores):
         """
         Advances the beam a step forward by selecting the
-        best candidates for the 
+        best `beam_size` number of candidates for the provided
+        scores.
         """
         if self.finished:
             return
@@ -194,9 +182,9 @@ class Beam:
             prev_scores = prev_scores.expand_as(scores)
             beam_scores = scores + prev_scores
 
-            for index in range(self.token_ids[-1].size(0)):
-                if self.token_ids[-1][index] == self.end_index:
-                    beam_scores[index] = neginf(scores.dtype)
+            for idx in range(self.token_ids[-1].size(0)):
+                if self.token_ids[-1][idx] == self.end_index:
+                    beam_scores[idx] = neginf(scores.dtype)
 
         # flatten beam scores is vocab_size * beam_size
         flatten_beam_scores = beam_scores.view(-1)
@@ -210,14 +198,14 @@ class Beam:
         self.hyp_ids.append(top_idxs / vocab_size)
         self.token_ids.append(top_idxs % vocab_size)
 
-        for hyp_id in range(self.beam_size):
-            if self.token_ids[-1][hyp_id] == self.end_index:
+        for hyp_idx in range(self.beam_size):
+            if self.token_ids[-1][hyp_idx] == self.end_index:
                 time_step = len(self.token_ids)
                 self.finished_hyps.append(
                     Hypothesis(
-                        hyp_id=hyp_id, 
+                        hyp_id=hyp_idx, 
                         time_step=time_step,
-                        score=self.scores[hyp_id] / (time_step + 1)))
+                        score=self.scores[hyp_idx] / (time_step + 1)))
 
                 if len(self.finished_hyps) == self.beam_size:
                     self.finished = True
@@ -225,10 +213,19 @@ class Beam:
 
 
     def get_result(self):
-        """"""
+        """
+        Returns the tokens ans scores of the best hypotesis.
+        """
         best_hyp = sorted(self.finished_hyps, key=lambda x: x.score)[0]
-        
         token_ids, scores = [], []
-        for ts in range(best_hyp.timestep, 0, -1):
-            pass
-            
+        hyp_id = best_hyp.hyp_id
+        
+        for ts in range(best_hyp.time_step - 1, 0, -1):
+            token_ids.insert(0, self.token_ids[ts][hyp_id])
+            scores.insert(0, self.all_scores[ts][hyp_id])
+            hyp_id = int(self.hyp_ids[ts - 1][hyp_id])
+        
+        token_ids = torch.tensor(token_ids)
+        scores = torch.tensor(scores)
+
+        return token_ids, scores

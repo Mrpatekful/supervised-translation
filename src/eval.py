@@ -48,10 +48,10 @@ def setup_eval_args():
 def translate(text, model, fields, vocabs, indices, beam_size):
     """Translates the given text with beam search."""
     src_field, trg_field = fields
-    vec = text2ids(text, src_field)
+    ids = text2ids(text, src_field)
     preds, _ = beam_search(
         model=model, 
-        inputs=vec, 
+        inputs=ids, 
         indices=indices,
         beam_size=beam_size, 
         device=DEVICE)
@@ -79,12 +79,14 @@ def main():
 
     while True:
         try:
+            print()
             text = input()
             output = translate(
                 text=text, model=model,
                 fields=fields, vocabs=vocabs,
                 indices=indices, beam_size=args.beam_size)
-            print(output)
+            print('Translation: {}'.format(output))
+            print()
             
         except KeyboardInterrupt:
             break

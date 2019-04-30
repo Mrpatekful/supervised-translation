@@ -7,7 +7,6 @@
 @date:      2019.04.04.
 """
 
-import spacy
 import torch
 import sys
 
@@ -47,14 +46,18 @@ def text2ids(text, field):
     """
     Converts a text to list of ids.
     """
-    return field.numericalize(text)
+    tokenized = field.preprocess(text)
+    return field.numericalize([tokenized])
 
 
 def ids2text(ids, field):
     """
     Converts a list of ids to text.
     """
-    return ' '.join([field.itos[i] for i in ids])
+    offset = len(field.vocab.specials) * \
+        int(field.vocab.specials_first)
+    return ' '.join(field.vocab.itos[i + offset] 
+        for i in ids)
 
 
 def create_datasets(args, device):
