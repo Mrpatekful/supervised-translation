@@ -49,7 +49,7 @@ def translate(text, model, fields, vocabs, indices, beam_size):
     """Translates the given text with beam search."""
     src_field, trg_field = fields
     ids = text2ids(text, src_field)
-    preds, _ = beam_search(
+    _, preds = beam_search(
         model=model, 
         inputs=ids, 
         indices=indices,
@@ -62,8 +62,10 @@ def translate(text, model, fields, vocabs, indices, beam_size):
 
 def main():
     args = setup_eval_args()
-    state_dict = torch.load(join(args.model_dir, 'model.pt'))
-    fields = torch.load(join(args.model_dir, 'fields.pt'))
+    state_dict = torch.load(join(args.model_dir, 'model.pt'), 
+        map_location=DEVICE)
+    fields = torch.load(join(args.model_dir, 'fields.pt'), 
+        map_location=DEVICE)
 
     src_field, trg_field = fields['src'], fields['trg']
 

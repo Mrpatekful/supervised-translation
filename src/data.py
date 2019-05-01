@@ -9,6 +9,7 @@
 
 import torch
 import sys
+import re
 
 from os.path import exists, join, dirname, abspath
 from torchtext.datasets import Multi30k
@@ -19,17 +20,13 @@ from nltk.translate import bleu
 START_TOKEN = '<sos>'
 END_TOKEN = '<eos>'
 PAD_TOKEN = '<pad>'
+UNK_TOKEN = '<unk>'
 
 
 def setup_data_args(parser):
     """
     Sets up the data arguments.
     """
-    parser.add_argument(
-        '--batch_size',
-        type=int,
-        default=32,
-        help='Size of the batches during training.')
     parser.add_argument(
         '--data_dir',
         type=str,
@@ -38,9 +35,9 @@ def setup_data_args(parser):
     parser.add_argument(
         '--vocab_size',
         type=int,
-        default=3000,
+        default=30000,
         help='Maximum size of the vocabulary.')
-    
+
 
 def text2ids(text, field):
     """
@@ -54,10 +51,7 @@ def ids2text(ids, field):
     """
     Converts a list of ids to text.
     """
-    offset = len(field.vocab.specials) * \
-        int(field.vocab.specials_first)
-    return ' '.join(field.vocab.itos[i + offset] 
-        for i in ids)
+    return ' '.join(field.vocab.itos[i] for i in ids)
 
 
 def create_datasets(args, device):
@@ -68,12 +62,20 @@ def create_datasets(args, device):
     if not exists(fields_path):
         src = Field(
             batch_first=True,
+            pad_token=PAD_TOKEN,
+            unk_token=UNK_TOKEN,
+            tokenize='spacy',
+            tokenizer_language='en_core_web_sm',
             lower=True)
 
         trg = Field(
             init_token=START_TOKEN, 
             eos_token=END_TOKEN,
+            pad_token=PAD_TOKEN,
+            unk_token=UNK_TOKEN,
             batch_first=True,
+            tokenize='spacy',
+            tokenizer_language='de_core_news_sm',
             lower=True,
             is_target=True)
     else:
@@ -88,12 +90,17 @@ def create_datasets(args, device):
         root=args.data_dir)
 
     if not exists(fields_path):
+        # including specials first, so the last indices
+        # can be truncated when creating
+        # the output layer of the vocab.
         src.build_vocab(
             train, valid, 
+            specials_first=False,
             max_size=args.vocab_size)
 
         trg.build_vocab(
             train, valid, 
+            specials_first=False,
             max_size=args.vocab_size)
 
         print('Saving fields to {}'.format(fields_path))

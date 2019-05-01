@@ -15,6 +15,7 @@ import math
 
 from torch.nn.functional import log_softmax
 from collections import namedtuple
+from model import repeat_hidden
 
 NEAR_INF = 1e20
 
@@ -65,6 +66,9 @@ def beam_search(model, inputs, indices, beam_size, device,
     _, trg_pad_index, start_index, end_index = indices 
 
     encoder_outputs, hidden_state = model.encoder(inputs)
+
+    hidden_state = repeat_hidden(
+            hidden_state, model.decoder.rnn_layer.num_layers)
 
     # a beam is created for each element of the batch
     beams = create_beams(
@@ -122,7 +126,7 @@ def beam_search(model, inputs, indices, beam_size, device,
 
     top_preds, top_scores = beam.get_result()
 
-    return top_preds, top_scores 
+    return top_scores, top_preds
 
 
 class Beam:
@@ -211,10 +215,9 @@ class Beam:
                     self.finished = True
                     break
 
-
     def get_result(self):
         """
-        Returns the tokens ans scores of the best hypotesis.
+        Returns the tokens and scores of the best hypotesis.
         """
         best_hyp = sorted(self.finished_hyps, key=lambda x: x.score)[0]
         token_ids, scores = [], []

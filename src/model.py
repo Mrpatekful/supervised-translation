@@ -18,7 +18,7 @@ from torch.nn.functional import (
     log_softmax, softmax)
 
 from torch.nn import (
-    CrossEntropyLoss, LSTM, 
+    NLLLoss, LSTM, 
     Embedding, Linear,
     Softmax, Dropout)
 
@@ -30,7 +30,7 @@ def setup_model_args(parser):
     parser.add_argument(
         '--hidden_size',
         type=int,
-        default=128,
+        default=256,
         help='Hidden size of the model.')
     parser.add_argument(
         '--embedding_size',
@@ -63,7 +63,16 @@ def create_criterion(args, pad_index):
     """
     Creates the loss for the seq2seq model.
     """
-    return CrossEntropyLoss(ignore_index=pad_index, reduction='sum')
+    return NLLLoss(ignore_index=pad_index, reduction='sum')
+
+
+def repeat_hidden(hidden_states, times):
+    """
+    Repeats the tuple of hidden states along the first axis.
+    """
+    hidden_states = tuple(hs.repeat([times, 1, 1]) 
+        for hs in hidden_states)
+    return hidden_states
 
 
 class Seq2Seq(Module):
@@ -75,6 +84,7 @@ class Seq2Seq(Module):
                  hidden_size, indices,
                  source_vocab_size, target_vocab_size, **kwargs):
         super().__init__()
+
         self.encoder = Encoder(
             input_size=embedding_size,
             hidden_size=hidden_size,
@@ -93,36 +103,35 @@ class Seq2Seq(Module):
         """
         Runs the inputs through the encoder-decoder model.
         """
+        batch_size = inputs.size(0)
+        max_len = targets.size(1) if \
+            targets is not None else max_len
+
         encoder_outputs, encoder_hidden = self.encoder(inputs)
 
-        if targets is None:
-            scores, preds = self.decode_greedy(
-                encoder_outputs, encoder_hidden, max_len)
-        else:
-            scores, preds = self.decode_forced(
-                targets, encoder_outputs, encoder_hidden)
+        hidden_state = repeat_hidden(
+            encoder_hidden, self.decoder.rnn_layer.num_layers)
 
-        return scores, preds
-
-    def decode_greedy(self, encoder_outputs, encoder_hidden, max_len):
-        """
-        Applies greedy decoding on the provided inputs.
-        """
-        batch_size = encoder_outputs.size(0)
         preds = self.START_INDEX.detach().expand(batch_size, 1)
         scores = []
 
-        hidden_state = encoder_hidden
+        for idx in range(max_len):
+            # if targets are provided and training, 
+            # apply teacher forcing with 0.5 ratio
+            if targets is not None and random.random() > 0.5 and \
+                    self.training:
+                step_input = targets[:, idx].unsqueeze(1)
+            else:
+                step_input = preds[:, -1:]
 
-        for _ in range(max_len):
             step_output, hidden_state = self.decoder(
-                inputs=preds[:, -1:], 
+                inputs=step_input, 
                 encoder_outputs=encoder_outputs,
                 hidden_state=hidden_state)
 
             step_output = step_output[:, -1:, :]
-            step_scores = log_softmax(step_output, dim=2)
-            _, step_preds = step_scores.max(dim=2)
+            step_scores = log_softmax(step_output, dim=-1)
+            _, step_preds = step_scores.max(dim=-1)
 
             preds = torch.cat([preds, step_preds], dim=1)
 
@@ -134,20 +143,10 @@ class Seq2Seq(Module):
 
             if all_finished and not self.training:
                 break
-            
+        
         scores = torch.cat(scores, 1)
         preds = preds.narrow(1, 1, preds.size(1) - 1)
         preds = preds.contiguous()
-
-        return scores, preds
-
-    def decode_forced(self, targets, encoder_outputs, encoder_hidden):
-        """
-        Applies teacher forcing with the provided targets.
-        """
-        logits, _ = self.decoder(targets, encoder_outputs, encoder_hidden)
-        scores = log_softmax(logits, dim=2)
-        _, preds = logits.max(dim=2)
 
         return scores, preds
     
@@ -159,23 +158,25 @@ class Encoder(Module):
 
     def __init__(self, input_size, hidden_size, vocab_size):
         super().__init__()
+
         self.embedding_layer = Embedding(
             num_embeddings=vocab_size,
             embedding_dim=input_size)
 
-        self.recurrent_layer = LSTM(
+        self.rnn_layer = LSTM(
             input_size=input_size, 
             hidden_size=hidden_size,
             batch_first=True,
             bidirectional=True,
-            num_layers=1)
+            dropout=0.2,
+            num_layers=2)
 
     def forward(self, inputs):
         """
         Computes the embeddings and runs them through an LSTM.
         """
         embedded_inputs = self.embedding_layer(inputs)
-        encoder_outputs, hidden_states = self.recurrent_layer(
+        encoder_outputs, hidden_states = self.rnn_layer(
             embedded_inputs)
         
         hidden_states = (
@@ -192,19 +193,25 @@ class Decoder(Module):
 
     def __init__(self, input_size, hidden_size, vocab_size):
         super().__init__()
+
+        # the final token is the unk, 
+        # which wont be the output of the model
         self.embedding_layer = Embedding(
-            num_embeddings=vocab_size,
+            num_embeddings=vocab_size - 1,
             embedding_dim=input_size)
 
-        self.recurrent_layer = LSTM(
+        self.rnn_layer = LSTM(
             input_size=input_size, 
             hidden_size=hidden_size,
             batch_first=True,
-            num_layers=1)
+            dropout=0.2,
+            num_layers=2)
 
+        # the final 2 tokens in the vocab are the unk and sos
+        # neither of these should be the output of the model
         self.output_layer = Linear(
             in_features=hidden_size, 
-            out_features=vocab_size)
+            out_features=vocab_size - 2)
 
         self.attention_layer = Attention(
             hidden_size=hidden_size)
@@ -213,27 +220,18 @@ class Decoder(Module):
         """
         Applies decoding with attention mechanism.
         """       
-        outputs = []
-        sequence_len = inputs.size(1)
         embedded_inputs = self.embedding_layer(inputs)
 
-        # seq len is 1, when using greedy or beam search
-        # decoding, and is equal to the target seq len
-        # during teacher forcing
-        for step in range(sequence_len):
-            step_output, hidden_state = self.recurrent_layer(
-                embedded_inputs[:, step, :].unsqueeze(1), 
-                hidden_state)
+        output, hidden_state = self.rnn_layer(
+            embedded_inputs, 
+            hidden_state)
+        
+        output, _ = self.attention_layer(
+            decoder_output=output, 
+            last_hidden=hidden_state, 
+            encoder_outputs=encoder_outputs)
 
-            step_output, _ = self.attention_layer(
-                decoder_output=step_output, 
-                last_hidden=hidden_state, 
-                encoder_outputs=encoder_outputs)
-
-            outputs.append(step_output)
-
-        outputs = torch.cat(outputs, dim=1).to(inputs.device)
-        logits = self.output_layer(outputs)
+        logits = self.output_layer(output)
 
         return logits, hidden_state
 
@@ -246,6 +244,7 @@ class Attention(Module):
 
     def __init__(self, hidden_size):
         super().__init__()
+
         self.attn_layer = Linear(
             in_features=hidden_size, 
             out_features=hidden_size * 2, 
@@ -253,7 +252,8 @@ class Attention(Module):
 
         self.combine_layer = Linear(
             in_features=hidden_size * 3, 
-            out_features=hidden_size)        
+            out_features=hidden_size,
+            bias=False)        
 
     def forward(self, decoder_output, last_hidden, encoder_outputs):
         """
@@ -266,8 +266,8 @@ class Attention(Module):
         encoder_outputs_t = encoder_outputs.transpose(1, 2)
 
         attn_scores = torch.bmm(last_hidden, encoder_outputs_t)
-        attn_weights = softmax(attn_scores, dim=1)
-        
+        attn_weights = softmax(attn_scores, dim=-1)
+
         attention_applied = torch.bmm(attn_weights, encoder_outputs)
 
         merged = torch.cat(

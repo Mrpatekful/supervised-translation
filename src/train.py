@@ -14,7 +14,6 @@
 
 import argparse
 import torch
-import random
 import os
 
 import numpy as np
@@ -29,7 +28,8 @@ from collections import OrderedDict
 from data import (
     create_datasets, 
     setup_data_args, 
-    get_special_indices)
+    get_special_indices,
+    ids2text)
 
 from model import (
     create_model, 
@@ -70,6 +70,11 @@ def setup_train_args():
         default=join(PROJECT_DIR, 'model.{}'.format(
             datetime.today().strftime('%j%H%m'))),
         help='Path of the model checkpoints.')
+    parser.add_argument(
+        '--batch_size',
+        type=int,
+        default=128,
+        help='Size of the batches during training.')
 
     setup_data_args(parser)
     setup_model_args(parser)
@@ -91,16 +96,17 @@ def save_state(model, optimizer, path):
     print('Saving model to {}'.format(model_path))
 
 
-def load_state(model, optimizer, path):
+def load_state(model, optimizer, path, device):
     """
     Loads the model and optimizer state.
     """
     try:
         model_path = join(path, 'model.pt')
-        state = torch.load(model_path)
+        state_dict = torch.load(
+            model_path, map_location=device)
 
-        model.load_state_dict(state['model'])
-        optimizer.load_state_dict(state['optimizer'])
+        model.load_state_dict(state_dict['model'])
+        optimizer.load_state_dict(state_dict['optimizer'])
         print('Loading model from {}'.format(model_path))
     except FileNotFoundError:
         pass
@@ -119,9 +125,10 @@ def compute_loss(outputs, targets, criterion, pad_index):
     Computes the loss and accuracy with masking.
     """
     scores, preds = outputs
-
+    
     scores_view = scores.view(-1, scores.size(-1))
     targets_view = targets.view(-1)
+
     loss = criterion(scores_view, targets_view)
     
     notnull = targets.ne(pad_index)
@@ -142,15 +149,14 @@ def train_step(model, criterion, optimizer, batch, indices):
 
     _, trg_pad_index, _, _ = indices
     inputs, targets = batch.src, batch.trg
+
+    # targets[:, 0] is the sos token
+    targets = targets[:, 1:].contiguous()
     max_len = targets.size(1)
-
-    # Apply teacher forcing at a 0.5 ratio.
-    if random.random() > 0.5:
-        outputs = model(inputs=inputs, max_len=max_len)
-    else:
-        outputs = model(inputs=inputs, targets=targets, 
-                        max_len=max_len)
-
+    
+    outputs = model(inputs=inputs, targets=targets, 
+                    max_len=max_len)
+    
     loss, accuracy = compute_loss(
         outputs=outputs, 
         targets=targets, 
@@ -158,7 +164,6 @@ def train_step(model, criterion, optimizer, batch, indices):
         pad_index=trg_pad_index)
 
     loss.backward()
-
     optimizer.step()
 
     return loss.detach().cpu().numpy(), accuracy
@@ -170,6 +175,9 @@ def eval_step(model, criterion, batch, indices, device, beam_size):
     """
     inputs, targets = batch.src, batch.trg
     src_pad_index, trg_pad_index, _, _ = indices
+
+    targets = targets[:, 1:].contiguous()
+    batch_size, max_len = targets.size()
     
     if beam_size > 1:
         outputs = beam_search(
@@ -178,17 +186,16 @@ def eval_step(model, criterion, batch, indices, device, beam_size):
             indices=indices,
             beam_size=beam_size,
             device=device,
-            max_len=targets.size(1))
+            max_len=max_len)
     else:
-        outputs = model(inputs=inputs, max_len=targets.size(1))
+        outputs = model(inputs=inputs, max_len=max_len)
 
     scores, preds = outputs
-    batch_size, sequence_length = targets.size()
-
+    
     # Handling the case when greedy or beam search decoding
     # terminates before target sequence length.
-    if scores.size(1) < sequence_length:
-        size_diff = sequence_length - scores.size(1)
+    if scores.size(1) < max_len:
+        size_diff = max_len - scores.size(1)
         scores = torch.cat([scores, torch.zeros(
             [batch_size, size_diff, scores.size(2)])], dim=1) 
         preds = torch.cat([preds, src_pad_index.expand(
@@ -217,7 +224,7 @@ def train(model, datasets, indices, args, device):
     criterion = create_criterion(args, trg_pad_index)
     optimizer = create_optimizer(args, model.parameters())
 
-    load_state(model, optimizer, args.model_dir)
+    load_state(model, optimizer, args.model_dir, device)
 
     for epoch in range(args.epochs):
 
@@ -225,7 +232,6 @@ def train(model, datasets, indices, args, device):
         with tqdm(total=len(train)) as pbar:
             pbar.set_description('epoch {}'.format(epoch))
             model.train()
-
             for batch in train:
                 loss, accuracy = train_step(
                     model=model, 
