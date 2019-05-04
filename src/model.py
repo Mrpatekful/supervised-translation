@@ -23,6 +23,9 @@ from torch.nn import (
     Softmax, Dropout)
 
 
+NEAR_INF = 1e20
+
+
 def setup_model_args(parser):
     """
     Sets up the model arguments.
@@ -39,6 +42,13 @@ def setup_model_args(parser):
         help='Embedding dimension for the tokens.')
 
 
+def neginf():
+    """
+    Represents the negative infinity for the dtype.
+    """
+    return -NEAR_INF
+
+
 def create_model(args, vocabs, indices, device):
     """
     Creates the sequence to sequence model.
@@ -46,14 +56,12 @@ def create_model(args, vocabs, indices, device):
     src_vocab, trg_vocab = vocabs
     src_vocab_size, trg_vocab_size = len(src_vocab), len(trg_vocab)
 
-    start_index, end_index, _, _ = indices
-    start_index = torch.tensor(start_index).to(device)
-    end_index = torch.tensor(end_index).to(device) 
+    tensor_indices = [torch.tensor(i).to(device) for i in indices]
 
     model = Seq2Seq(
         source_vocab_size=src_vocab_size, 
         target_vocab_size=trg_vocab_size,
-        indices=(start_index, end_index),
+        indices=tensor_indices,
         **vars(args)).to(device)
 
     return model
@@ -95,9 +103,8 @@ class Seq2Seq(Module):
             hidden_size=hidden_size, 
             vocab_size=target_vocab_size)
 
-        start_index, end_index = indices
-        self.START_INDEX = start_index
-        self.END_INDEX = end_index
+        self.start_index, self.end_index, \
+            self.pad_index, _, self.unk_index = indices
 
     def forward(self, inputs, targets=None, max_len=50):
         """
@@ -107,49 +114,60 @@ class Seq2Seq(Module):
         max_len = targets.size(1) if \
             targets is not None else max_len
 
+        attn_mask = inputs.eq(self.pad_index)
+
+        # randomly masking input with unk during training
+        if self.training:
+            # replacing token with unk at 0.1 prob
+            unk_mask = inputs.new(
+                inputs.size()).float().uniform_(0, 1) < 0.1
+            inputs.masked_fill_(
+                mask=unk_mask & inputs.ne(self.pad_index), 
+                value=self.unk_index)
+
         encoder_outputs, encoder_hidden = self.encoder(inputs)
 
         hidden_state = repeat_hidden(
             encoder_hidden, self.decoder.rnn_layer.num_layers)
 
-        preds = self.START_INDEX.detach().expand(batch_size, 1)
+        preds = self.start_index.detach().expand(batch_size, 1)
         scores = []
 
         for idx in range(max_len):
             # if targets are provided and training, 
-            # apply teacher forcing with 0.5 ratio
+            # apply teacher forcing 50% of the time
             if targets is not None and random.random() > 0.5 and \
                     self.training:
                 step_input = targets[:, idx].unsqueeze(1)
             else:
                 step_input = preds[:, -1:]
 
-            step_output, hidden_state = self.decoder(
+            logits, hidden_state = self.decoder(
                 inputs=step_input, 
                 encoder_outputs=encoder_outputs,
-                hidden_state=hidden_state)
+                hidden_state=hidden_state,
+                attn_mask=attn_mask)
 
-            step_output = step_output[:, -1:, :]
-            step_scores = log_softmax(step_output, dim=-1)
+            logits = logits[:, -1:, :]
+            step_scores = log_softmax(logits, dim=-1)
             _, step_preds = step_scores.max(dim=-1)
 
-            preds = torch.cat([preds, step_preds], dim=1)
-
+            preds = torch.cat([preds, step_preds], 1)
             scores.append(step_scores)
 
             all_finished = (
-                (preds == self.END_INDEX)
+                (preds == self.end_index)
                 .sum(dim=1) > 0).sum().item() == batch_size
 
             if all_finished and not self.training:
                 break
-        
+
         scores = torch.cat(scores, 1)
         preds = preds.narrow(1, 1, preds.size(1) - 1)
         preds = preds.contiguous()
 
         return scores, preds
-    
+
 
 class Encoder(Module):
     """
@@ -159,9 +177,11 @@ class Encoder(Module):
     def __init__(self, input_size, hidden_size, vocab_size):
         super().__init__()
 
-        self.embedding_layer = Embedding(
+        self.emb_layer = Embedding(
             num_embeddings=vocab_size,
             embedding_dim=input_size)
+
+        self.dropout = Dropout(p=0.1)
 
         self.rnn_layer = LSTM(
             input_size=input_size, 
@@ -175,10 +195,11 @@ class Encoder(Module):
         """
         Computes the embeddings and runs them through an LSTM.
         """
-        embedded_inputs = self.embedding_layer(inputs)
+        embedded = self.emb_layer(inputs)
+        embedded = self.dropout(embedded)
         encoder_outputs, hidden_states = self.rnn_layer(
-            embedded_inputs)
-        
+            embedded)
+
         hidden_states = (
             hidden_states[0].sum(0).unsqueeze(0),
             hidden_states[1].sum(0).unsqueeze(0))
@@ -194,11 +215,11 @@ class Decoder(Module):
     def __init__(self, input_size, hidden_size, vocab_size):
         super().__init__()
 
-        # the final token is the unk, 
-        # which wont be the output of the model
-        self.embedding_layer = Embedding(
-            num_embeddings=vocab_size - 1,
+        self.emb_layer = Embedding(
+            num_embeddings=vocab_size,
             embedding_dim=input_size)
+
+        self.dropout = Dropout(p=0.1)
 
         self.rnn_layer = LSTM(
             input_size=input_size, 
@@ -207,29 +228,30 @@ class Decoder(Module):
             dropout=0.2,
             num_layers=2)
 
-        # the final 2 tokens in the vocab are the unk and sos
-        # neither of these should be the output of the model
+        self.attn_layer = Attention(hidden_size=hidden_size)
+
+        # the final token in the vocab is the init token
+        # which wont be the output of the model
         self.output_layer = Linear(
             in_features=hidden_size, 
-            out_features=vocab_size - 2)
+            out_features=vocab_size - 1)
 
-        self.attention_layer = Attention(
-            hidden_size=hidden_size)
-        
-    def forward(self, inputs, encoder_outputs, hidden_state):
+    def forward(self, inputs, encoder_outputs, hidden_state, 
+                attn_mask=None):
         """
         Applies decoding with attention mechanism.
-        """       
-        embedded_inputs = self.embedding_layer(inputs)
+        """
+        embedded = self.emb_layer(inputs)
+        embedded = self.dropout(embedded)
 
         output, hidden_state = self.rnn_layer(
-            embedded_inputs, 
-            hidden_state)
+            embedded, hidden_state)
         
-        output, _ = self.attention_layer(
+        output, _ = self.attn_layer(
             decoder_output=output, 
             last_hidden=hidden_state, 
-            encoder_outputs=encoder_outputs)
+            encoder_outputs=encoder_outputs,
+            attn_mask=attn_mask)
 
         logits = self.output_layer(output)
 
@@ -250,30 +272,34 @@ class Attention(Module):
             out_features=hidden_size * 2, 
             bias=False)
 
-        self.combine_layer = Linear(
-            in_features=hidden_size * 3, 
+        self.merge_layer = Linear(
+            in_features=hidden_size * 3,
             out_features=hidden_size,
-            bias=False)        
+            bias=False)
 
-    def forward(self, decoder_output, last_hidden, encoder_outputs):
+    def forward(self, decoder_output, last_hidden, encoder_outputs, 
+                attn_mask=None):
         """
         Applies attention by creating the weighted context vector.
         Implementation is based on `facebookresearch ParlAI`.
         """
+        # last_hidden is a tuple because of lstm, selecting the
+        # the first tensor which is the real hidden state
         last_hidden = last_hidden[0][-1].unsqueeze(1)
         last_hidden = self.attn_layer(last_hidden)
 
         encoder_outputs_t = encoder_outputs.transpose(1, 2)
+        attn_scores = torch.bmm(last_hidden, encoder_outputs_t).squeeze(1)
 
-        attn_scores = torch.bmm(last_hidden, encoder_outputs_t)
-        attn_weights = softmax(attn_scores, dim=-1)
+        # during beam search mask might not be provided
+        if attn_mask is not None:
+            attn_scores.masked_fill_(attn_mask, neginf())
 
+        attn_weights = softmax(attn_scores.unsqueeze(1), dim=-1)
         attention_applied = torch.bmm(attn_weights, encoder_outputs)
 
-        merged = torch.cat(
+        output = self.merge_layer(torch.cat(
             (decoder_output.squeeze(1), 
-            attention_applied.squeeze(1)), dim=1)
-
-        output = torch.tanh(self.combine_layer(merged).unsqueeze(1))
+            attention_applied.squeeze(1)), dim=1).unsqueeze(1))
 
         return output, attn_weights

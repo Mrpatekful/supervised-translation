@@ -12,11 +12,20 @@
 # pylint: disable=no-member
 # pylint: disable=not-callable
 
-import argparse
 import torch
+
+torch.manual_seed(0)
+torch.backends.cudnn.deterministic = True
+
+import argparse
 import os
+import random
+
+random.seed(0)
 
 import numpy as np
+
+np.random.seed(0)
 
 from os.path import exists, join, dirname, abspath
 from torch.optim import Adam
@@ -24,6 +33,7 @@ from torch.optim import Adam
 from datetime import datetime
 from tqdm import tqdm
 from collections import OrderedDict
+from nltk.translate import bleu
 
 from data import (
     create_datasets, 
@@ -52,7 +62,7 @@ def setup_train_args():
     parser.add_argument(
         '--epochs',
         type=int,
-        default=100,
+        default=20,
         help='Maximum number of epochs for training.')
     parser.add_argument(
         '--cuda',
@@ -83,7 +93,7 @@ def setup_train_args():
     return parser.parse_args()
 
 
-def save_state(model, optimizer, path):
+def save_state(model, optimizer, avg_loss, path):
     """
     Saves the model and optimizer state.
     """
@@ -91,6 +101,7 @@ def save_state(model, optimizer, path):
     state = {
         'model': model.state_dict(),
         'optimizer': optimizer.state_dict(),
+        'avg_loss': avg_loss
     }
     torch.save(state, model_path)
     print('Saving model to {}'.format(model_path))
@@ -108,8 +119,10 @@ def load_state(model, optimizer, path, device):
         model.load_state_dict(state_dict['model'])
         optimizer.load_state_dict(state_dict['optimizer'])
         print('Loading model from {}'.format(model_path))
+        return state_dict['avg_loss']
+
     except FileNotFoundError:
-        pass
+        return np.inf
 
 
 def create_optimizer(args, parameters):
@@ -125,15 +138,13 @@ def compute_loss(outputs, targets, criterion, pad_index):
     Computes the loss and accuracy with masking.
     """
     scores, preds = outputs
-    
     scores_view = scores.view(-1, scores.size(-1))
     targets_view = targets.view(-1)
 
     loss = criterion(scores_view, targets_view)
-    
-    notnull = targets.ne(pad_index)
-    target_tokens = notnull.long().sum().item()
-    correct = ((targets == preds) * notnull).sum().item()
+    notpad = targets.ne(pad_index)
+    target_tokens = notpad.long().sum().item()
+    correct = ((targets == preds) * notpad).sum().item()
 
     accuracy = correct / target_tokens
     loss = loss / target_tokens
@@ -147,7 +158,7 @@ def train_step(model, criterion, optimizer, batch, indices):
     """
     optimizer.zero_grad()
 
-    _, trg_pad_index, _, _ = indices
+    _, _, _, trg_pad_index, _ = indices
     inputs, targets = batch.src, batch.trg
 
     # targets[:, 0] is the sos token
@@ -174,7 +185,7 @@ def eval_step(model, criterion, batch, indices, device, beam_size):
     Performs a single step of evaluation.
     """
     inputs, targets = batch.src, batch.trg
-    src_pad_index, trg_pad_index, _, _ = indices
+    _, _, _, trg_pad_index, _ = indices
 
     targets = targets[:, 1:].contiguous()
     batch_size, max_len = targets.size()
@@ -192,14 +203,16 @@ def eval_step(model, criterion, batch, indices, device, beam_size):
 
     scores, preds = outputs
     
-    # Handling the case when greedy or beam search decoding
-    # terminates before target sequence length.
+    # handling the case when greedy or beam search decoding
+    # terminates before target sequence length
     if scores.size(1) < max_len:
         size_diff = max_len - scores.size(1)
-        scores = torch.cat([scores, torch.zeros(
-            [batch_size, size_diff, scores.size(2)])], dim=1) 
-        preds = torch.cat([preds, src_pad_index.expand(
-            batch_size, size_diff)], dim=1)
+        zeros = torch.zeros(
+            [batch_size, size_diff, scores.size(2)]).to(device)
+        scores = torch.cat([scores, zeros], 1)
+        paddings = torch.tensor(trg_pad_index).expand(
+            batch_size, size_diff).to(device)
+        preds = torch.cat([preds, paddings], 1)
 
         outputs = scores, preds
 
@@ -209,80 +222,85 @@ def eval_step(model, criterion, batch, indices, device, beam_size):
         criterion=criterion,
         pad_index=trg_pad_index)
 
-    return loss.cpu().numpy(), accuracy
+    return loss.cpu().numpy(), accuracy, preds
 
 
 def train(model, datasets, indices, args, device):
     """
     Performs training, validation and testing.
     """
-    src_pad_index, trg_pad_index, _, _ = indices
-    src_pad_index = torch.tensor(src_pad_index)
-    src_pad_index.to(device)
+    _, _, _, trg_pad_index, _ = indices
 
     train, valid, test = datasets
     criterion = create_criterion(args, trg_pad_index)
     optimizer = create_optimizer(args, model.parameters())
 
-    load_state(model, optimizer, args.model_dir, device)
+    prev_avg_loss = load_state(
+        model, optimizer, args.model_dir, device)
 
     for epoch in range(args.epochs):
 
-        # Running training loop.
-        with tqdm(total=len(train)) as pbar:
-            pbar.set_description('epoch {}'.format(epoch))
-            model.train()
-            for batch in train:
-                loss, accuracy = train_step(
-                    model=model, 
-                    criterion=criterion, 
-                    optimizer=optimizer,
-                    indices=indices, 
-                    batch=batch)
+        # running training loop
+        loop = tqdm(train)
+        loop.set_description('epoch {}'.format(epoch))
+        model.train()
 
-                pbar.set_postfix(ordered_dict=OrderedDict(
-                    loss=loss, acc=accuracy))
-                pbar.update()
+        for batch in loop:
+            loss, accuracy = train_step(
+                model=model, 
+                criterion=criterion, 
+                optimizer=optimizer,
+                indices=indices, 
+                batch=batch)
 
-        # Running validation loop.
-        with tqdm(total=len(valid)) as pbar:
-            pbar.set_description('validation')
-            model.eval()
+            loop.set_postfix(ordered_dict=OrderedDict(
+                loss=loss, acc=accuracy))
 
-            with torch.no_grad():
-                for batch in valid:
-                    loss, accuracy = eval_step(
-                        model=model,
-                        criterion=criterion,
-                        indices=indices,
-                        device=device,
-                        beam_size=1,
-                        batch=batch)
-                
-                    pbar.set_postfix(ordered_dict=OrderedDict(
-                        loss=loss, acc=accuracy))
-                    pbar.update()
-
-        save_state(model, optimizer, args.model_dir)
-
-    # Running testing loop.
-    with tqdm(total=len(test)) as pbar:
-        pbar.set_description('testing')
+        # running validation loop
+        loop = tqdm(valid)
+        loop.set_description('validation')
         model.eval()
+        avg_loss = []
 
         with torch.no_grad():
-            for batch in test:
-                loss, accuracy = eval_step(
+            for batch in loop:
+                loss, accuracy, _ = eval_step(
                     model=model,
                     criterion=criterion,
                     indices=indices,
                     device=device,
-                    beam_size=args.beam_size,
+                    beam_size=1,
                     batch=batch)
-                
-                pbar.set_postfix(ordered_dict=OrderedDict(
+
+                avg_loss.append(loss)
+                loop.set_postfix(ordered_dict=OrderedDict(
                     loss=loss, acc=accuracy))
-                pbar.update()
+
+        avg_loss = sum(avg_loss) / len(avg_loss)
+        tqdm.write(
+            'avg validation loss: {:.4}'.format(avg_loss))
+        if avg_loss < prev_avg_loss:
+            save_state(
+                model, optimizer, avg_loss, args.model_dir)
+            prev_avg_loss = avg_loss
+
+    # running testing loop
+    loop = tqdm(test)
+    loop.set_description('testing')
+    model.eval()
+
+    with torch.no_grad():
+        for batch in loop:
+            loss, accuracy, _ = eval_step(
+                model=model,
+                criterion=criterion,
+                indices=indices,
+                device=device,
+                beam_size=args.beam_size,
+                batch=batch)
+            
+            loop.set_postfix(ordered_dict=OrderedDict(
+                loss=loss, acc=accuracy))
 
 
 def main():
@@ -291,7 +309,6 @@ def main():
 
     datasets, vocabs = create_datasets(args, device)
     indices = get_special_indices(vocabs)
-
     model = create_model(args, vocabs, indices, device)
 
     train(model, datasets, indices, args, device)

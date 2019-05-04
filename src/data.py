@@ -13,7 +13,7 @@ import re
 
 from os.path import exists, join, dirname, abspath
 from torchtext.datasets import Multi30k
-from torchtext.data import Field, BucketIterator
+from torchtext.data import Field, HarvardBucketIterator
 from nltk.translate import bleu
 
 
@@ -35,8 +35,18 @@ def setup_data_args(parser):
     parser.add_argument(
         '--vocab_size',
         type=int,
-        default=30000,
+        default=20000,
         help='Maximum size of the vocabulary.')
+    parser.add_argument(
+        '--min_freq',
+        type=int,
+        default=2,
+        help='Minimum frequency of a word in the vocab.')
+    parser.add_argument(
+        '--max_len',
+        type=int,
+        default=50,
+        help='Maximum length of a sequence.')
 
 
 def text2ids(text, field):
@@ -96,11 +106,13 @@ def create_datasets(args, device):
         src.build_vocab(
             train, valid, 
             specials_first=False,
+            min_freq=args.min_freq,
             max_size=args.vocab_size)
 
         trg.build_vocab(
             train, valid, 
             specials_first=False,
+            min_freq=args.min_freq,
             max_size=args.vocab_size)
 
         print('Saving fields to {}'.format(fields_path))
@@ -108,10 +120,10 @@ def create_datasets(args, device):
 
     vocabs = src.vocab, trg.vocab
 
-    iterators = BucketIterator.splits(
+    iterators = HarvardBucketIterator.splits(
         (train, valid, test), 
         batch_sizes=[args.batch_size] * 3,
-        sort_key=lambda x: len(x.src),
+        sort_key=lambda x: (len(x.src), len(x.trg)),
         device=device)
 
     return iterators, vocabs
@@ -126,8 +138,10 @@ def get_special_indices(vocabs):
     start_index = trg_vocab.stoi[START_TOKEN]
     end_index = trg_vocab.stoi[END_TOKEN]
 
+    unk_index = src_vocab.stoi[UNK_TOKEN]
+
     src_pad_index = src_vocab.stoi[PAD_TOKEN]
     trg_pad_index = trg_vocab.stoi[PAD_TOKEN]
 
     return start_index, end_index, src_pad_index, \
-        trg_pad_index
+        trg_pad_index, unk_index

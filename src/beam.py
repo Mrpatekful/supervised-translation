@@ -15,9 +15,8 @@ import math
 
 from torch.nn.functional import log_softmax
 from collections import namedtuple
-from model import repeat_hidden
+from model import repeat_hidden, neginf
 
-NEAR_INF = 1e20
 
 Hypothesis = namedtuple('Hypothesis', ['hyp_id', 'time_step', 'score'])
 
@@ -31,13 +30,6 @@ def setup_beam_args(parser):
         type=int,
         default=3,
         help='Number of beam segments.')
-
-
-def neginf(dtype):
-    """
-    Represents the negative infinity for the dtype.
-    """
-    return -NEAR_INF
 
 
 def create_beams(*args, batch_size, **kwargs):
@@ -63,7 +55,7 @@ def beam_search(model, inputs, indices, beam_size, device,
     Implementation is based on `facebookresearch ParlAI`.
     """
     batch_size = inputs.size(0)
-    _, trg_pad_index, start_index, end_index = indices 
+    start_index, end_index, _, trg_pad_index, _ = indices 
 
     encoder_outputs, hidden_state = model.encoder(inputs)
 
@@ -74,7 +66,8 @@ def beam_search(model, inputs, indices, beam_size, device,
     beams = create_beams(
         beam_size=beam_size, pad_index=trg_pad_index, 
         start_index=start_index, end_index=end_index,
-        min_len=min_len, device=device, batch_size=batch_size)
+        min_len=min_len, max_len=max_len, device=device, 
+        batch_size=batch_size)
 
     # the decoder has beam_size * batch_size inputs
     decoder_input = torch.tensor(start_index).to(device)
@@ -96,7 +89,7 @@ def beam_search(model, inputs, indices, beam_size, device,
             break
 
         logits, hidden_state = model.decoder(
-            inputs=decoder_input, 
+            inputs=decoder_input[:, -1:], 
             encoder_outputs=encoder_outputs, 
             hidden_state=hidden_state)
 
@@ -124,7 +117,12 @@ def beam_search(model, inputs, indices, beam_size, device,
         prev_output = prev_output.unsqueeze(-1)
         decoder_input = torch.cat([decoder_input, prev_output], dim=-1)
 
-    top_preds, top_scores = beam.get_result()
+    top_scores, top_preds = beam.get_result()
+
+    # TODO fix beam results
+    # top_scores, top_preds = list(zip(*[b.get_result() for b in beams]))
+    # top_scores = torch.cat(top_scores).view(batch_size, -1)
+    # top_preds = torch.cat(top_preds).view(batch_size, -1)
 
     return top_scores, top_preds
 
@@ -132,7 +130,7 @@ def beam_search(model, inputs, indices, beam_size, device,
 class Beam:
 
     def __init__(self, beam_size, pad_index, start_index,
-                 end_index, min_len, device):
+                 end_index, min_len, max_len, device):
         """
         A beam that contains `beam_size` decoding candidates.
         Each beam operates on a single input sequence from the batch.
@@ -142,6 +140,7 @@ class Beam:
         self.start_index = start_index
         self.end_index = end_index
         self.min_len = min_len
+        self.max_len = max_len
         self.device = device
         self.finished = False
 
@@ -174,7 +173,7 @@ class Beam:
         if current_length < self.min_len:
             # penalizing end token before reaching minimum length
             for hyp_idx in range(scores.size(0)):
-                scores[hyp_idx][self.end_index] = neginf(scores.dtype)
+                scores[hyp_idx][self.end_index] = neginf()
 
         if len(self.hyp_ids) == 0:
             # the scores for the first step is simply the
@@ -188,7 +187,7 @@ class Beam:
 
             for idx in range(self.token_ids[-1].size(0)):
                 if self.token_ids[-1][idx] == self.end_index:
-                    beam_scores[idx] = neginf(scores.dtype)
+                    beam_scores[idx] = neginf()
 
         # flatten beam scores is vocab_size * beam_size
         flatten_beam_scores = beam_scores.view(-1)
@@ -202,9 +201,10 @@ class Beam:
         self.hyp_ids.append(top_idxs / vocab_size)
         self.token_ids.append(top_idxs % vocab_size)
 
+        time_step = len(self.token_ids)
         for hyp_idx in range(self.beam_size):
-            if self.token_ids[-1][hyp_idx] == self.end_index:
-                time_step = len(self.token_ids)
+            if self.token_ids[-1][hyp_idx] == self.end_index or \
+                    time_step == self.max_len - 1:
                 self.finished_hyps.append(
                     Hypothesis(
                         hyp_id=hyp_idx, 
@@ -228,7 +228,7 @@ class Beam:
             scores.insert(0, self.all_scores[ts][hyp_id])
             hyp_id = int(self.hyp_ids[ts - 1][hyp_id])
         
-        token_ids = torch.tensor(token_ids)
+        preds = torch.tensor(token_ids)
         scores = torch.tensor(scores)
 
-        return token_ids, scores
+        return scores, preds 
