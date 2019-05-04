@@ -13,11 +13,11 @@ Minimalist implementation of supervised neural machine translation on multi30k d
 ## Results
 
 ```
-i am playing tennis .
-ich spiele tennis tennis <eos>
+I am playing tennis.
+ich spiele tennis . <eos>
 
 
-how old are you ?
+How old are you?
 wie alt sind du ? <eos>
 
 
@@ -25,10 +25,10 @@ do you want to play basketball ?
 willst sie basketball spielen spielen <eos>
 
 
-what is your favourite hobby ?
-was ist dein hobby freizeitbeschäftigung ? <eos>
+A man in jeans at the beach playing with a red ball.
+Translation: ein mann in jeans am am strand mit einem roten ball <eos>
 
 
-my name is something .
-mein heiße ist etwas . <eos>
+A man cooking food on the stove.
+Translation: ein mann kocht essen dem dem herd . <eos>
 ```
