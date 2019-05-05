@@ -1,6 +1,6 @@
 # Neural machine translation
 
-Minimalist implementation of supervised neural machine translation on multi30k dataset with seq2seq architecture, attention meachanism and beam search in pytorch. My forked [version](https://github.com/Mrpatekful/text) of torchtext is used as dataloader.
+Minimalist implementation of supervised neural machine translation on multi30k dataset with seq2seq architecture, attention mechanism and beam search in pytorch. My forked [version](https://github.com/Mrpatekful/text) of torchtext is used as dataloader.
 
 ## References
 
