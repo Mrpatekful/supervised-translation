@@ -21,7 +21,7 @@ How old are you?
 wie alt sind du ? <eos>
 
 
-do you want to play basketball ?
+Do you want to play basketball?
 willst sie basketball spielen spielen <eos>
 
 
