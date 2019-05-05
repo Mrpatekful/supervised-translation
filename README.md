@@ -1,6 +1,6 @@
 # Neural machine translation
 
-Minimalist implementation of supervised neural machine translation on multi30k dataset with seq2seq architecture, attention meachanism and beam search in pytorch. My forked [version](https://github.com/Mrpatekful/text) of torchtext is used as dataloader.
+Minimalist implementation of supervised neural machine translation on multi30k dataset with seq2seq architecture, attention mechanism and beam search in pytorch. My forked [version](https://github.com/Mrpatekful/text) of torchtext is used as dataloader.
 
 ## References
 
@@ -26,9 +26,9 @@ willst sie basketball spielen spielen <eos>
 
 
 A man in jeans at the beach playing with a red ball.
-Translation: ein mann in jeans am am strand mit einem roten ball <eos>
+ein mann in jeans am am strand mit einem roten ball <eos>
 
 
 A man cooking food on the stove.
-Translation: ein mann kocht essen dem dem herd . <eos>
+ein mann kocht essen dem dem herd . <eos>
 ```
