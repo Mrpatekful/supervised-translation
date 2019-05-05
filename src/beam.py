@@ -52,7 +52,8 @@ def beam_search(model, inputs, indices, beam_size, device,
                 min_len=3, max_len=50):
     """
     Applies beam search decoding on the provided inputs.
-    Implementation is based on `facebookresearch ParlAI`.
+    Implementation is based on `facebookresearch ParlAI`
+    and `PyTorch-OpenNMT`.
     """
     batch_size = inputs.size(0)
     start_index, end_index, _, trg_pad_index, _ = indices 
@@ -60,7 +61,7 @@ def beam_search(model, inputs, indices, beam_size, device,
     encoder_outputs, hidden_state = model.encoder(inputs)
 
     hidden_state = repeat_hidden(
-            hidden_state, model.decoder.rnn_layer.num_layers)
+        hidden_state, model.decoder.rnn_layer.num_layers)
 
     # a beam is created for each element of the batch
     beams = create_beams(
@@ -117,12 +118,14 @@ def beam_search(model, inputs, indices, beam_size, device,
         prev_output = prev_output.unsqueeze(-1)
         decoder_input = torch.cat([decoder_input, prev_output], dim=-1)
 
-    top_scores, top_preds = beam.get_result()
-
-    # TODO fix beam results
-    # top_scores, top_preds = list(zip(*[b.get_result() for b in beams]))
-    # top_scores = torch.cat(top_scores).view(batch_size, -1)
-    # top_preds = torch.cat(top_preds).view(batch_size, -1)
+    # merging the best result from the beams into
+    # a single batch of outputs
+    top_scores, top_preds = list(
+        zip(*[b.get_result(decoder_input.size(-1)) for b in beams]))
+        
+    top_preds = torch.cat(top_preds).view(batch_size, -1)
+    top_scores = torch.cat(top_scores).view(
+        batch_size, top_preds.size(-1), -1)
 
     return top_scores, top_preds
 
@@ -146,8 +149,9 @@ class Beam:
 
         # scores of each candidate of the beam
         self.scores = torch.zeros(beam_size).to(device)
-        # `self.scores` values for each time step
-        self.all_scores = [torch.zeros(beam_size).to(device)]
+        # top score values of each hyp for each time step
+        self.top_scores = [torch.zeros(beam_size).to(device)]
+        self.all_scores = [None]
         # ids of the previous candidates
         self.hyp_ids = []
         self.finished_hyps = []
@@ -168,7 +172,8 @@ class Beam:
 
         # `scores` is the softmax output of the decoder
         vocab_size = scores.size(-1)
-        current_length = len(self.all_scores) - 1
+        current_length = len(self.top_scores) - 1
+        self.all_scores.append(scores)
 
         if current_length < self.min_len:
             # penalizing end token before reaching minimum length
@@ -195,7 +200,7 @@ class Beam:
             flatten_beam_scores, self.beam_size, dim=-1)
 
         self.scores = top_scores
-        self.all_scores.append(self.scores)
+        self.top_scores.append(self.scores)
 
         # selecting the id of the best hyp at the current step
         self.hyp_ids.append(top_idxs / vocab_size)
@@ -215,20 +220,29 @@ class Beam:
                     self.finished = True
                     break
 
-    def get_result(self):
+    def get_result(self, size):
         """
         Returns the tokens and scores of the best hypotesis.
         """
         best_hyp = sorted(self.finished_hyps, key=lambda x: x.score)[0]
         token_ids, scores = [], []
         hyp_id = best_hyp.hyp_id
-        
+
         for ts in range(best_hyp.time_step - 1, 0, -1):
             token_ids.insert(0, self.token_ids[ts][hyp_id])
-            scores.insert(0, self.all_scores[ts][hyp_id])
+            scores.insert(0, self.all_scores[ts][hyp_id].unsqueeze(0))
             hyp_id = int(self.hyp_ids[ts - 1][hyp_id])
         
-        preds = torch.tensor(token_ids)
-        scores = torch.tensor(scores)
+        # creating a tensor of size `size` at first dimension, so
+        # it can be concatenated with the results of other beams
+        padded_preds = torch.tensor(self.pad_index).expand(size)
 
-        return scores, preds 
+        # apparently cloning is required after expand when
+        # performing in-place operations
+        padded_preds = padded_preds.clone()
+        padded_preds[:len(token_ids)] = torch.tensor(token_ids)
+
+        padded_scores = torch.zeros([1, size, scores[0].size(-1)])
+        padded_scores[0, :len(scores), :] = torch.cat(scores, 0)
+
+        return padded_scores, padded_preds

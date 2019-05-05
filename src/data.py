@@ -61,7 +61,10 @@ def ids2text(ids, field):
     """
     Converts a list of ids to text.
     """
-    return ' '.join(field.vocab.itos[i] for i in ids)
+    pad_idx = field.vocab.stoi[PAD_TOKEN]
+    end_idx = field.vocab.stoi[END_TOKEN]
+    return ' '.join(field.vocab.itos[i] for i in ids 
+        if i not in (pad_idx, end_idx))
 
 
 def create_datasets(args, device):

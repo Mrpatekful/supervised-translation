@@ -55,7 +55,7 @@ def translate(text, model, fields, vocabs, indices, beam_size):
         indices=indices,
         beam_size=beam_size, 
         device=DEVICE)
-    output = ids2text(preds, trg_field)
+    output = ids2text(preds.squeeze(), trg_field)
 
     return output
 
@@ -87,7 +87,7 @@ def main():
                 text=text, model=model,
                 fields=fields, vocabs=vocabs,
                 indices=indices, beam_size=args.beam_size)
-            print('Translation: {}'.format(output))
+            print(output)
             print()
             
         except KeyboardInterrupt:

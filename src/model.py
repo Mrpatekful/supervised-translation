@@ -117,8 +117,8 @@ class Seq2Seq(Module):
         attn_mask = inputs.eq(self.pad_index)
 
         # randomly masking input with unk during training
+        # replacing token with unk at 0.1 prob
         if self.training:
-            # replacing token with unk at 0.1 prob
             unk_mask = inputs.new(
                 inputs.size()).float().uniform_(0, 1) < 0.1
             inputs.masked_fill_(
@@ -158,7 +158,9 @@ class Seq2Seq(Module):
             all_finished = (
                 (preds == self.end_index)
                 .sum(dim=1) > 0).sum().item() == batch_size
-
+            
+            # during training decode should run until
+            # the end of targets
             if all_finished and not self.training:
                 break
 

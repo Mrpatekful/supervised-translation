@@ -13,19 +13,17 @@
 # pylint: disable=not-callable
 
 import torch
-
-torch.manual_seed(0)
-torch.backends.cudnn.deterministic = True
-
 import argparse
 import os
 import random
 
-random.seed(0)
-
 import numpy as np
 
+torch.manual_seed(0)
 np.random.seed(0)
+random.seed(0)
+
+torch.backends.cudnn.deterministic = True
 
 from os.path import exists, join, dirname, abspath
 from torch.optim import Adam
@@ -83,7 +81,7 @@ def setup_train_args():
     parser.add_argument(
         '--batch_size',
         type=int,
-        default=128,
+        default=10,
         help='Size of the batches during training.')
 
     setup_data_args(parser)
@@ -142,11 +140,13 @@ def compute_loss(outputs, targets, criterion, pad_index):
     targets_view = targets.view(-1)
 
     loss = criterion(scores_view, targets_view)
+
+    # computing accuracy without including the pad tokens
     notpad = targets.ne(pad_index)
     target_tokens = notpad.long().sum().item()
     correct = ((targets == preds) * notpad).sum().item()
-
     accuracy = correct / target_tokens
+
     loss = loss / target_tokens
 
     return loss, accuracy
