@@ -15,5 +15,5 @@ elif [ $RUN_MODE == "eval" ]
 then
     python $(dirname "$0")/src/eval.py --model_dir $MODEL_DIR
 else
-    echo "Invalid run mode command $RUN_MODE."
+    echo "Invalid run mode `$RUN_MODE`."
 fi

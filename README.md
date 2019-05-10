@@ -1,6 +1,6 @@
 # Neural machine translation
 
-Minimalist implementation of supervised neural machine translation on multi30k dataset with seq2seq architecture, attention mechanism and beam search in pytorch. My forked [version](https://github.com/Mrpatekful/text) of torchtext is used as dataloader.
+Supervised neural machine translation on english-german multi30k dataset with seq2seq architecture, luong-style general attention mechanism and beam search in pytorch. I employ label smoothing and mixture of softmaxes with several other tweaks for better results. My forked [version](https://github.com/Mrpatekful/text) of torchtext is used as dataloader during training.
 
 ## References
 
@@ -10,9 +10,13 @@ Minimalist implementation of supervised neural machine translation on multi30k d
 
 - **[Beam Search Strategies for Neural Machine Translation](https://arxiv.org/pdf/1702.01806.pdf)**
 
+- **[Breaking the Softmax Bottleneck: A High-Rank RNN Language Model](https://arxiv.org/pdf/1711.03953.pdf)**
+
 ## Results
 
-```
+The model reaches 20 BLEU score out of the box with the default parameters in 10 epochs. The randomly picked examples below give an overall idea about the performance.
+
+```text
 I am playing tennis.
 ich spiele tennis . <eos>
 

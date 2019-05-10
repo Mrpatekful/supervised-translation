@@ -13,12 +13,15 @@
 
 import argparse
 import torch
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 
 from os.path import join
 
 from beam import setup_beam_args, beam_search
 
 from data import (
+    PAD, END,
     ids2text, 
     text2ids, 
     get_special_indices)
@@ -26,17 +29,21 @@ from data import (
 from model import create_model, setup_model_args
 
 
-DEVICE = 'cpu'
-
-
 def setup_eval_args():
-    """Sets up the arguments for evaluation."""
+    """
+    Sets up the arguments for evaluation.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--model_dir', 
         type=str,
         default=None,
         help='Path of the model file.')
+    parser.add_argument(
+        '--cuda',
+        type=bool,
+        default=False,
+        help='Device for evaluation.')
 
     setup_beam_args(parser)
     setup_model_args(parser)
@@ -45,8 +52,11 @@ def setup_eval_args():
 
 
 @torch.no_grad()
-def translate(text, model, fields, vocabs, indices, beam_size):
-    """Translates the given text with beam search."""
+def translate(text, model, fields, vocabs, indices, beam_size,
+              device):
+    """
+    Translates the given text with beam search.
+    """
     src_field, trg_field = fields
     ids = text2ids(text, src_field)
     _, preds = beam_search(
@@ -54,18 +64,20 @@ def translate(text, model, fields, vocabs, indices, beam_size):
         inputs=ids, 
         indices=indices,
         beam_size=beam_size, 
-        device=DEVICE)
-    output = ids2text(preds.squeeze(), trg_field)
+        device=device)
+    output = ids2text([preds.squeeze()], trg_field)[0]
 
-    return output
+    return ' '.join(w for w in output if w not in (PAD, END))
 
 
 def main():
     args = setup_eval_args()
+    device = torch.device('cuda' if args.cuda else 'cpu') 
+
     state_dict = torch.load(join(args.model_dir, 'model.pt'), 
-        map_location=DEVICE)
+        map_location=device)
     fields = torch.load(join(args.model_dir, 'fields.pt'), 
-        map_location=DEVICE)
+        map_location=device)
 
     src_field, trg_field = fields['src'], fields['trg']
 
@@ -73,7 +85,7 @@ def main():
     vocabs = src_field.vocab, trg_field.vocab
     indices = get_special_indices(vocabs)
     
-    model = create_model(args, vocabs, indices, DEVICE)
+    model = create_model(args, vocabs, indices, device)
     model.load_state_dict(state_dict['model'])
     model.eval()
 
@@ -84,9 +96,13 @@ def main():
             print()
             text = input()
             output = translate(
-                text=text, model=model,
-                fields=fields, vocabs=vocabs,
-                indices=indices, beam_size=args.beam_size)
+                text=text, 
+                model=model,
+                fields=fields, 
+                vocabs=vocabs,
+                indices=indices, 
+                beam_size=args.beam_size,
+                device=device)
             print(output)
             print()
             

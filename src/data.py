@@ -17,10 +17,10 @@ from torchtext.data import Field, HarvardBucketIterator
 from nltk.translate import bleu
 
 
-START_TOKEN = '<sos>'
-END_TOKEN = '<eos>'
-PAD_TOKEN = '<pad>'
-UNK_TOKEN = '<unk>'
+START = '<sos>'
+END = '<eos>'
+PAD = '<pad>'
+UNK = '<unk>'
 
 
 def setup_data_args(parser):
@@ -57,35 +57,35 @@ def text2ids(text, field):
     return field.numericalize([tokenized])
 
 
-def ids2text(ids, field):
+def ids2text(ids, field, ignored=None):
     """
     Converts a list of ids to text.
     """
-    pad_idx = field.vocab.stoi[PAD_TOKEN]
-    end_idx = field.vocab.stoi[END_TOKEN]
-    return ' '.join(field.vocab.itos[i] for i in ids 
-        if i not in (pad_idx, end_idx))
+    if ignored is None:
+        ignored = []
+    return [[field.vocab.itos[i] for 
+        i in s if i not in ignored] for s in ids]
 
 
 def create_datasets(args, device):
     """
-    Creates the datasets.
+    Either loads the fields or creates the datasets.
     """
     fields_path = join(args.model_dir, 'fields.pt')
     if not exists(fields_path):
         src = Field(
             batch_first=True,
-            pad_token=PAD_TOKEN,
-            unk_token=UNK_TOKEN,
+            pad_token=PAD,
+            unk_token=UNK,
             tokenize='spacy',
             tokenizer_language='en_core_web_sm',
             lower=True)
 
         trg = Field(
-            init_token=START_TOKEN, 
-            eos_token=END_TOKEN,
-            pad_token=PAD_TOKEN,
-            unk_token=UNK_TOKEN,
+            init_token=START, 
+            eos_token=END,
+            pad_token=PAD,
+            unk_token=UNK,
             batch_first=True,
             tokenize='spacy',
             tokenizer_language='de_core_news_sm',
@@ -121,30 +121,30 @@ def create_datasets(args, device):
         print('Saving fields to {}'.format(fields_path))
         torch.save({'src': src, 'trg': trg}, fields_path)
 
-    vocabs = src.vocab, trg.vocab
+    fields = src, trg
 
     iterators = HarvardBucketIterator.splits(
-        (train, valid, test), 
+        (train, valid, test),
         batch_sizes=[args.batch_size] * 3,
         sort_key=lambda x: (len(x.src), len(x.trg)),
         device=device)
 
-    return iterators, vocabs
+    return iterators, fields
 
 
-def get_special_indices(vocabs):
+def get_special_indices(fields):
     """
     Returns the special token indices from the vocab.
     """
-    src_vocab, trg_vocab = vocabs
+    src, trg = fields
 
-    start_index = trg_vocab.stoi[START_TOKEN]
-    end_index = trg_vocab.stoi[END_TOKEN]
+    start_idx = trg.vocab.stoi[START]
+    end_idx = trg.vocab.stoi[END]
 
-    unk_index = src_vocab.stoi[UNK_TOKEN]
+    unk_idx = src.vocab.stoi[UNK]
 
-    src_pad_index = src_vocab.stoi[PAD_TOKEN]
-    trg_pad_index = trg_vocab.stoi[PAD_TOKEN]
+    src_pad_idx = src.vocab.stoi[PAD]
+    trg_pad_idx = trg.vocab.stoi[PAD]
 
-    return start_index, end_index, src_pad_index, \
-        trg_pad_index, unk_index
+    return start_idx, end_idx, src_pad_idx, \
+        trg_pad_idx, unk_idx

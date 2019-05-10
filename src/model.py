@@ -18,12 +18,11 @@ from torch.nn.functional import (
     log_softmax, softmax)
 
 from torch.nn import (
-    NLLLoss, LSTM, 
+    LSTM, Dropout,
     Embedding, Linear,
-    Softmax, Dropout)
+    Softmax)
 
-
-NEAR_INF = 1e20
+from data import get_special_indices
 
 
 def setup_model_args(parser):
@@ -46,32 +45,25 @@ def neginf():
     """
     Represents the negative infinity for the dtype.
     """
-    return -NEAR_INF
+    return -1e20
 
 
-def create_model(args, vocabs, indices, device):
+def create_model(args, fields, device):
     """
     Creates the sequence to sequence model.
     """
-    src_vocab, trg_vocab = vocabs
-    src_vocab_size, trg_vocab_size = len(src_vocab), len(trg_vocab)
+    src, trg = fields
+    indices = get_special_indices(fields)
 
     tensor_indices = [torch.tensor(i).to(device) for i in indices]
 
     model = Seq2Seq(
-        source_vocab_size=src_vocab_size, 
-        target_vocab_size=trg_vocab_size,
+        source_vocab_size=len(src.vocab), 
+        target_vocab_size=len(trg.vocab),
         indices=tensor_indices,
         **vars(args)).to(device)
 
     return model
-
-
-def create_criterion(args, pad_index):
-    """
-    Creates the loss for the seq2seq model.
-    """
-    return NLLLoss(ignore_index=pad_index, reduction='sum')
 
 
 def repeat_hidden(hidden_states, times):
@@ -85,7 +77,7 @@ def repeat_hidden(hidden_states, times):
 
 class Seq2Seq(Module):
     """
-    The Seq2Seq model.
+    The sequence-to-sequence model.
     """
 
     def __init__(self, embedding_size, 
@@ -103,8 +95,8 @@ class Seq2Seq(Module):
             hidden_size=hidden_size, 
             vocab_size=target_vocab_size)
 
-        self.start_index, self.end_index, \
-            self.pad_index, _, self.unk_index = indices
+        self.start_idx, self.end_idx, \
+            self.pad_idx, _, self.unk_idx = indices
 
     def forward(self, inputs, targets=None, max_len=50):
         """
@@ -114,25 +106,25 @@ class Seq2Seq(Module):
         max_len = targets.size(1) if \
             targets is not None else max_len
 
-        attn_mask = inputs.eq(self.pad_index)
+        attn_mask = inputs.eq(self.pad_idx)
 
         # randomly masking input with unk during training
-        # replacing token with unk at 0.1 prob
+        # which makes the model more robust to unks during testing
         if self.training:
             unk_mask = inputs.new(
                 inputs.size()).float().uniform_(0, 1) < 0.1
             inputs.masked_fill_(
-                mask=unk_mask & inputs.ne(self.pad_index), 
-                value=self.unk_index)
+                mask=unk_mask & inputs.ne(self.pad_idx), 
+                value=self.unk_idx)
 
         encoder_outputs, encoder_hidden = self.encoder(inputs)
-
+        
         hidden_state = repeat_hidden(
             encoder_hidden, self.decoder.rnn_layer.num_layers)
 
-        preds = self.start_index.detach().expand(batch_size, 1)
         scores = []
-
+        preds = self.start_idx.detach().expand(batch_size, 1)
+        
         for idx in range(max_len):
             # if targets are provided and training, 
             # apply teacher forcing 50% of the time
@@ -155,15 +147,6 @@ class Seq2Seq(Module):
             preds = torch.cat([preds, step_preds], 1)
             scores.append(step_scores)
 
-            all_finished = (
-                (preds == self.end_index)
-                .sum(dim=1) > 0).sum().item() == batch_size
-            
-            # during training decode should run until
-            # the end of targets
-            if all_finished and not self.training:
-                break
-
         scores = torch.cat(scores, 1)
         preds = preds.narrow(1, 1, preds.size(1) - 1)
         preds = preds.contiguous()
@@ -173,7 +156,7 @@ class Seq2Seq(Module):
 
 class Encoder(Module):
     """
-    Encoder module for the Seq2Seq model.
+    Encoder module for the seq2seq model.
     """
 
     def __init__(self, input_size, hidden_size, vocab_size):
@@ -211,7 +194,7 @@ class Encoder(Module):
 
 class Decoder(Module):
     """
-    Decoder module for the Seq2Seq.
+    Decoder module for the seq2seq.
     """
 
     def __init__(self, input_size, hidden_size, vocab_size):
@@ -291,7 +274,8 @@ class Attention(Module):
         last_hidden = self.attn_layer(last_hidden)
 
         encoder_outputs_t = encoder_outputs.transpose(1, 2)
-        attn_scores = torch.bmm(last_hidden, encoder_outputs_t).squeeze(1)
+        attn_scores = torch.bmm(
+            last_hidden, encoder_outputs_t).squeeze(1)
 
         # during beam search mask might not be provided
         if attn_mask is not None:

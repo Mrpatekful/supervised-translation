@@ -27,11 +27,14 @@ torch.backends.cudnn.deterministic = True
 
 from os.path import exists, join, dirname, abspath
 from torch.optim import Adam
+from torch.nn.utils import clip_grad_norm_
+
+from torch.nn.functional import kl_div
 
 from datetime import datetime
 from tqdm import tqdm
 from collections import OrderedDict
-from nltk.translate import bleu
+from nltk.translate.bleu_score import sentence_bleu
 
 from data import (
     create_datasets, 
@@ -41,7 +44,6 @@ from data import (
 
 from model import (
     create_model, 
-    create_criterion,
     setup_model_args)
 
 from beam import (
@@ -81,7 +83,7 @@ def setup_train_args():
     parser.add_argument(
         '--batch_size',
         type=int,
-        default=10,
+        default=128,
         help='Size of the batches during training.')
 
     setup_data_args(parser)
@@ -125,13 +127,41 @@ def load_state(model, optimizer, path, device):
 
 def create_optimizer(args, parameters):
     """
-    Creates an ADAM optimizer.
+    Creates an adam optimizer.
     """
-    optimizer = Adam(lr=args.learning_rate, params=parameters)
-    return optimizer
+    return Adam(lr=args.learning_rate, params=parameters)
 
 
-def compute_loss(outputs, targets, criterion, pad_index):
+def create_criterion(pad_idx, vocab_size, device, smoothing=0.1):
+    """
+    Creates label smoothing loss with kl-divergence for the
+    seq2seq model.
+    """
+    confidence = 1.0 - smoothing
+    # initializes the target distribution vector with smoothing
+    # value divided by the number of valid tokens
+    # the output is only vocab_size - 1 as explained in decoder
+    smoothed = torch.full(
+        (vocab_size - 1, ), smoothing / (vocab_size - 3)).to(device)
+    smoothed[pad_idx] = 0
+
+    def label_smoothing(outputs, targets):
+        """
+        Computes the kl-divergence between the preds and the 
+        smoothed target distribution.
+        """
+        smoothed_targets = smoothed.repeat(targets.size(0), 1)
+        smoothed_targets.scatter_(
+            1, targets.unsqueeze(1), confidence)
+        smoothed_targets.masked_fill_(
+            (targets == pad_idx).unsqueeze(1), 0)
+
+        return kl_div(outputs, smoothed_targets, reduction='sum')
+
+    return label_smoothing
+
+
+def compute_loss(outputs, targets, criterion, pad_idx):
     """
     Computes the loss and accuracy with masking.
     """
@@ -142,7 +172,7 @@ def compute_loss(outputs, targets, criterion, pad_index):
     loss = criterion(scores_view, targets_view)
 
     # computing accuracy without including the pad tokens
-    notpad = targets.ne(pad_index)
+    notpad = targets.ne(pad_idx)
     target_tokens = notpad.long().sum().item()
     correct = ((targets == preds) * notpad).sum().item()
     accuracy = correct / target_tokens
@@ -152,87 +182,88 @@ def compute_loss(outputs, targets, criterion, pad_index):
     return loss, accuracy
 
 
+def compute_bleu(outputs, targets, indices, fields):
+    """
+    Computes the bleu score for a batch of output 
+    target pairs.
+    """
+    _, trg = fields
+    _, end_idx, _, trg_pad_idx, _ = indices
+    ignored = end_idx, trg_pad_idx
+
+    references = ids2text(targets, trg, ignored)
+    hypotesis = ids2text(outputs, trg, ignored)
+
+    return [sentence_bleu([ref], hyp) for
+        ref, hyp, in zip(references, hypotesis)]
+
+
 def train_step(model, criterion, optimizer, batch, indices):
     """
-    Performs a single step of training.
+    Performs a single step of training 
     """
     optimizer.zero_grad()
 
-    _, _, _, trg_pad_index, _ = indices
+    _, _, _, trg_pad_idx, _ = indices
     inputs, targets = batch.src, batch.trg
 
-    # targets[:, 0] is the sos token
+    # the first token is the sos which is also
+    # created by the decoder internally
     targets = targets[:, 1:].contiguous()
     max_len = targets.size(1)
     
-    outputs = model(inputs=inputs, targets=targets, 
-                    max_len=max_len)
+    outputs = model(
+        inputs=inputs, 
+        targets=targets, 
+        max_len=max_len)
     
     loss, accuracy = compute_loss(
         outputs=outputs, 
         targets=targets, 
         criterion=criterion,
-        pad_index=trg_pad_index)
+        pad_idx=trg_pad_idx)
 
+    clip_grad_norm_(model.parameters(), 1.0)
     loss.backward()
     optimizer.step()
 
     return loss.detach().cpu().numpy(), accuracy
 
 
-def eval_step(model, criterion, batch, indices, device, beam_size):
+def eval_step(model, criterion, batch, indices, device):
     """
     Performs a single step of evaluation.
     """
     inputs, targets = batch.src, batch.trg
-    _, _, _, trg_pad_index, _ = indices
+    _, _, _, trg_pad_idx, _ = indices
 
     targets = targets[:, 1:].contiguous()
-    batch_size, max_len = targets.size()
+    max_len = targets.size(1)
     
-    if beam_size > 1:
-        outputs = beam_search(
-            model=model, 
-            inputs=inputs,
-            indices=indices,
-            beam_size=beam_size,
-            device=device,
-            max_len=max_len)
-    else:
-        outputs = model(inputs=inputs, max_len=max_len)
-
-    scores, preds = outputs
-    
-    # handling the case when greedy or beam search decoding
-    # terminates before target sequence length
-    if scores.size(1) < max_len:
-        size_diff = max_len - scores.size(1)
-        zeros = torch.zeros(
-            [batch_size, size_diff, scores.size(2)]).to(device)
-        scores = torch.cat([scores, zeros], 1)
-        paddings = torch.tensor(trg_pad_index).expand(
-            batch_size, size_diff).to(device)
-        preds = torch.cat([preds, paddings], 1)
-
-        outputs = scores, preds
+    outputs = model(inputs=inputs, max_len=max_len)
 
     loss, accuracy = compute_loss(
         outputs=outputs, 
         targets=targets, 
         criterion=criterion,
-        pad_index=trg_pad_index)
+        pad_idx=trg_pad_idx)
 
-    return loss.cpu().numpy(), accuracy, preds
+    _, preds = outputs
+
+    return loss.detach().cpu().numpy(), accuracy, preds
 
 
-def train(model, datasets, indices, args, device):
+def train(model, datasets, fields, args, device):
     """
     Performs training, validation and testing.
     """
-    _, _, _, trg_pad_index, _ = indices
+    _, trg = fields
+    indices = get_special_indices(fields)
+    _, _, _, trg_pad_idx, _ = indices
 
-    train, valid, test = datasets
-    criterion = create_criterion(args, trg_pad_index)
+    train, val, test = datasets
+    criterion = create_criterion(
+        trg_pad_idx, len(trg.vocab), device)
     optimizer = create_optimizer(args, model.parameters())
 
     prev_avg_loss = load_state(
@@ -257,8 +288,8 @@ def train(model, datasets, indices, args, device):
                 loss=loss, acc=accuracy))
 
         # running validation loop
-        loop = tqdm(valid)
-        loop.set_description('validation')
+        loop = tqdm(val)
+        loop.set_description('val')
         model.eval()
         avg_loss = []
 
@@ -269,7 +300,6 @@ def train(model, datasets, indices, args, device):
                     criterion=criterion,
                     indices=indices,
                     device=device,
-                    beam_size=1,
                     batch=batch)
 
                 avg_loss.append(loss)
@@ -277,8 +307,7 @@ def train(model, datasets, indices, args, device):
                     loss=loss, acc=accuracy))
 
         avg_loss = sum(avg_loss) / len(avg_loss)
-        tqdm.write(
-            'avg validation loss: {:.4}'.format(avg_loss))
+        tqdm.write('avg val loss: {:.4}'.format(avg_loss))
         if avg_loss < prev_avg_loss:
             save_state(
                 model, optimizer, avg_loss, args.model_dir)
@@ -288,30 +317,35 @@ def train(model, datasets, indices, args, device):
     loop = tqdm(test)
     loop.set_description('testing')
     model.eval()
+    bleu_scores = []
 
     with torch.no_grad():
         for batch in loop:
-            loss, accuracy, _ = eval_step(
+            loss, accuracy, outputs = eval_step(
                 model=model,
                 criterion=criterion,
                 indices=indices,
                 device=device,
-                beam_size=args.beam_size,
                 batch=batch)
-            
+
+            bleu_scores.extend(compute_bleu(
+                outputs, batch.trg, indices, fields))
+ 
             loop.set_postfix(ordered_dict=OrderedDict(
                 loss=loss, acc=accuracy))
-
+    
+    tqdm.write('test bleu score: {:.4}'.format(
+        sum(bleu_scores) / len(bleu_scores)))
+    
 
 def main():
     args = setup_train_args()
     device = torch.device('cuda' if args.cuda else 'cpu') 
 
-    datasets, vocabs = create_datasets(args, device)
-    indices = get_special_indices(vocabs)
-    model = create_model(args, vocabs, indices, device)
+    datasets, fields = create_datasets(args, device)
+    model = create_model(args, fields, device)
 
-    train(model, datasets, indices, args, device)
+    train(model, datasets, fields, args, device)
 
 
 if __name__ == '__main__':
