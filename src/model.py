@@ -154,6 +154,12 @@ class Seq2Seq(Module):
         return scores, preds
 
 
+class DropConnect(Module):
+    
+    def __init__(self):
+        pass
+
+
 class Encoder(Module):
     """
     Encoder module for the seq2seq model.
