@@ -155,6 +155,10 @@ class Seq2Seq(Module):
 
 
 class DropConnect(Module):
+    """
+    Implements the dropconnect dropout from
+    http://yann.lecun.com/exdb/publis/pdf/wan-icml-13.pdf.
+    """
     
     def __init__(self):
         pass
@@ -251,8 +255,8 @@ class Decoder(Module):
 
 class Attention(Module):
     """
-    Luong style general attention from:
-    https://arxiv.org/pdf/1508.04025.pdf
+    Luong style general attention from
+    https://arxiv.org/pdf/1508.04025.pdf.
     """
 
     def __init__(self, hidden_size):

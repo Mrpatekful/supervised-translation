@@ -1,10 +1,21 @@
 # Neural machine translation
 
-Supervised neural machine translation on english-german multi30k dataset with seq2seq architecture, luong-style general attention mechanism and beam search in pytorch. I employ label smoothing and mixture of softmaxes with several other tweaks for better results. My forked version of *[torchtext](https://github.com/Mrpatekful/text)* is used as dataloader during training.
+Supervised neural machine translation on english-german multi30k
+dataset with seq2seq architecture, luong-style general attention
+mechanism and beam search in pytorch. I employ label smoothing and
+mixture of softmaxes with several other tweaks for better results.
 
 ## Usage
 
+I rely on my own forked version of torchtext, which can be installed like this.
+
+```bash
+pip install git+https://github.com/Mrpatekful/text
+```
+
 The model can be trained with the following command.
+Note that `<data_dir>` and `<model_dir>` are optinal,
+as they are provided by default.
 
 ```bash
 ./run.sh "train" "<data_dir>" "<model_dir>"
