@@ -73,7 +73,7 @@ def create_datasets(args, device):
     """
     fields_path = join(args.model_dir, 'fields.pt')
     if not exists(fields_path):
-        src = Field(
+        SRC = Field(
             batch_first=True,
             pad_token=PAD,
             unk_token=UNK,
@@ -81,7 +81,7 @@ def create_datasets(args, device):
             tokenizer_language='en_core_web_sm',
             lower=True)
 
-        trg = Field(
+        TRG = Field(
             init_token=START, 
             eos_token=END,
             pad_token=PAD,
@@ -94,39 +94,39 @@ def create_datasets(args, device):
     else:
         print('Loading fields from {}'.format(fields_path))
         fields = torch.load(fields_path)
-        src = fields['src']
-        trg = fields['trg']
+        SRC = fields['src']
+        TRG = fields['trg']
 
     train, valid, test = Multi30k.splits(
         exts=('.en', '.de'),
-        fields=(src, trg),
+        fields=(SRC, TRG),
         root=args.data_dir)
 
     if not exists(fields_path):
         # including specials first, so the last indices
         # can be truncated when creating
         # the output layer of the vocab.
-        src.build_vocab(
+        SRC.build_vocab(
             train, valid, 
             specials_first=False,
             min_freq=args.min_freq,
             max_size=args.vocab_size)
 
-        trg.build_vocab(
+        TRG.build_vocab(
             train, valid, 
             specials_first=False,
             min_freq=args.min_freq,
             max_size=args.vocab_size)
 
         print('Saving fields to {}'.format(fields_path))
-        torch.save({'src': src, 'trg': trg}, fields_path)
+        torch.save({'src': SRC, 'trg': TRG}, fields_path)
 
-    fields = src, trg
+    fields = SRC, TRG
 
     iterators = HarvardBucketIterator.splits(
         (train, valid, test),
         batch_sizes=[args.batch_size] * 3,
-        sort_key=lambda x: (len(x.src), len(x.trg)),
+        sort_key=lambda x: (len(x.SRC), len(x.TRG)),
         device=device)
 
     return iterators, fields
@@ -136,15 +136,15 @@ def get_special_indices(fields):
     """
     Returns the special token indices from the vocab.
     """
-    src, trg = fields
+    SRC, TRG = fields
 
-    start_idx = trg.vocab.stoi[START]
-    end_idx = trg.vocab.stoi[END]
+    start_idx = TRG.vocab.stoi[START]
+    end_idx = TRG.vocab.stoi[END]
 
-    unk_idx = src.vocab.stoi[UNK]
+    unk_idx = SRC.vocab.stoi[UNK]
 
-    src_pad_idx = src.vocab.stoi[PAD]
-    trg_pad_idx = trg.vocab.stoi[PAD]
+    src_pad_idx = SRC.vocab.stoi[PAD]
+    trg_pad_idx = TRG.vocab.stoi[PAD]
 
     return start_idx, end_idx, src_pad_idx, \
         trg_pad_idx, unk_idx

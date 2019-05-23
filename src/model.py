@@ -126,7 +126,7 @@ class Seq2Seq(Module):
         preds = self.start_idx.detach().expand(batch_size, 1)
         
         for idx in range(max_len):
-            # if targets are provided and training, 
+            # if targets are provided and training then
             # apply teacher forcing 50% of the time
             if targets is not None and random.random() > 0.5 and \
                     self.training:

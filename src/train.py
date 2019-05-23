@@ -140,7 +140,6 @@ def create_criterion(pad_idx, vocab_size, device, smoothing=0.1):
     confidence = 1.0 - smoothing
     # initializes the target distribution vector with smoothing
     # value divided by the number of valid tokens
-    # the output is only vocab_size - 1 as explained in decoder
     smoothed = torch.full(
         (vocab_size - 1, ), smoothing / (vocab_size - 3)).to(device)
     smoothed[pad_idx] = 0
@@ -227,7 +226,7 @@ def train_step(model, criterion, optimizer, batch, indices):
     loss.backward()
     optimizer.step()
 
-    return loss.detach().cpu().numpy(), accuracy
+    return loss.item(), accuracy
 
 
 def eval_step(model, criterion, batch, indices, device):
@@ -250,7 +249,7 @@ def eval_step(model, criterion, batch, indices, device):
 
     _, preds = outputs
 
-    return loss.detach().cpu().numpy(), accuracy, preds
+    return loss.item(), accuracy, preds
 
 
 def train(model, datasets, fields, args, device):
