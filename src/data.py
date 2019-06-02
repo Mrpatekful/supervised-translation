@@ -63,8 +63,8 @@ def ids2text(ids, field, ignored=None):
     """
     if ignored is None:
         ignored = []
-    return [[field.vocab.itos[i] for 
-        i in s if i not in ignored] for s in ids]
+    return [[field.vocab.itos[i] for
+             i in s if i not in ignored] for s in ids]
 
 
 def create_datasets(args, device):
@@ -74,7 +74,6 @@ def create_datasets(args, device):
     fields_path = join(args.model_dir, 'fields.pt')
     if not exists(fields_path):
         SRC = Field(
-            batch_first=True,
             pad_token=PAD,
             unk_token=UNK,
             tokenize='spacy',
@@ -82,11 +81,10 @@ def create_datasets(args, device):
             lower=True)
 
         TRG = Field(
-            init_token=START, 
+            init_token=START,
             eos_token=END,
             pad_token=PAD,
             unk_token=UNK,
-            batch_first=True,
             tokenize='spacy',
             tokenizer_language='de_core_news_sm',
             lower=True,
@@ -107,13 +105,13 @@ def create_datasets(args, device):
         # can be truncated when creating
         # the output layer of the vocab.
         SRC.build_vocab(
-            train, valid, 
+            train, valid,
             specials_first=False,
             min_freq=args.min_freq,
             max_size=args.vocab_size)
 
         TRG.build_vocab(
-            train, valid, 
+            train, valid,
             specials_first=False,
             min_freq=args.min_freq,
             max_size=args.vocab_size)
@@ -126,7 +124,7 @@ def create_datasets(args, device):
     iterators = HarvardBucketIterator.splits(
         (train, valid, test),
         batch_sizes=[args.batch_size] * 3,
-        sort_key=lambda x: (len(x.SRC), len(x.TRG)),
+        sort_key=lambda x: (len(x.src), len(x.trg)),
         device=device)
 
     return iterators, fields

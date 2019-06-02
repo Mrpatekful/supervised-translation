@@ -13,12 +13,12 @@
 import torch
 import math
 
+from numpy import inf
 from torch.nn.functional import log_softmax
 from collections import namedtuple
-from model import repeat_hidden, neginf
 
 
-Hypothesis = namedtuple('Hypothesis', ['hyp_id', 'time_step', 'score'])
+Result = namedtuple('Result', ['hyp_id', 'time_step', 'score'])
 
 
 def setup_beam_args(parser):
@@ -56,18 +56,14 @@ def beam_search(model, inputs, indices, beam_size, device,
     and `PyTorch-OpenNMT`.
     """
     batch_size = inputs.size(0)
-    start_index, end_index, _, trg_pad_index, _ = indices 
+    start_index, *_ = indices
 
     encoder_outputs, hidden_state = model.encoder(inputs)
 
-    hidden_state = repeat_hidden(
-        hidden_state, model.decoder.rnn_layer.num_layers)
-
     # a beam is created for each element of the batch
     beams = create_beams(
-        beam_size=beam_size, pad_index=trg_pad_index, 
-        start_index=start_index, end_index=end_index,
-        min_len=min_len, max_len=max_len, device=device, 
+        beam_size=beam_size, indices=indices,
+        max_len=max_len, device=device,
         batch_size=batch_size)
 
     # the decoder has beam_size * batch_size inputs
@@ -79,19 +75,19 @@ def beam_search(model, inputs, indices, beam_size, device,
     indices = indices.unsqueeze(1).repeat(
         1, beam_size).view(-1)
 
-    # each encoder output is copied beam_size times, 
+    # each encoder output is copied beam_size times,
     # making `encoder_outputs` of size
     # [batch_size * beam_size, seq_len, encoder_hidden_dim]
     encoder_outputs = encoder_outputs.index_select(0, indices)
     hidden_state = select_hidden_states(hidden_state, indices)
-    
+
     for _ in range(max_len):
         if all(beam.finished for beam in beams):
             break
 
         logits, hidden_state = model.decoder(
-            inputs=decoder_input[:, -1:], 
-            encoder_outputs=encoder_outputs, 
+            inputs=decoder_input[:, -1:],
+            encoder_outputs=encoder_outputs,
             hidden_state=hidden_state)
 
         logits = logits[:, -1:, :]
@@ -107,7 +103,7 @@ def beam_search(model, inputs, indices, beam_size, device,
         # prepares the indices, which select the hidden states
         # of the best scoring outputs
         indices = torch.cat([
-            beam_size * idx + beam.hyp_ids[-1] 
+            beam_size * idx + beam.hyp_ids[-1]
             for idx, beam in enumerate(beams)
         ])
 
@@ -122,7 +118,7 @@ def beam_search(model, inputs, indices, beam_size, device,
     # a single batch of outputs
     top_scores, top_preds = list(
         zip(*[b.get_result(decoder_input.size(-1)) for b in beams]))
-        
+
     top_preds = torch.cat(top_preds).view(batch_size, -1)
     top_scores = torch.cat(top_scores).view(
         batch_size, top_preds.size(-1), -1)
@@ -132,20 +128,16 @@ def beam_search(model, inputs, indices, beam_size, device,
 
 class Beam:
 
-    def __init__(self, beam_size, pad_index, start_index,
-                 end_index, min_len, max_len, device):
+    def __init__(self, beam_size, indices, max_len, device):
         """
         A beam that contains `beam_size` decoding candidates.
         Each beam operates on a single input sequence from the batch.
         """
         self.beam_size = beam_size
-        self.pad_index = pad_index
-        self.start_index = start_index
-        self.end_index = end_index
-        self.min_len = min_len
         self.max_len = max_len
-        self.device = device
         self.finished = False
+
+        self.pad_idx, self.end_idx, self.start_idx = indices
 
         # scores of each candidate of the beam
         self.scores = torch.zeros(beam_size).to(device)
@@ -154,12 +146,12 @@ class Beam:
         self.all_scores = [None]
         # ids of the previous candidates
         self.hyp_ids = []
-        self.finished_hyps = []
+        self.results = []
 
         # output token ids of the hyps at each step
         self.token_ids = [
-            torch.tensor(start_index)
-                .expand(beam_size).to(device)]
+            torch.tensor(self.start_idx)
+            .expand(beam_size).to(device)]
 
     def step(self, scores):
         """
@@ -172,13 +164,7 @@ class Beam:
 
         # `scores` is the softmax output of the decoder
         vocab_size = scores.size(-1)
-        current_length = len(self.top_scores) - 1
         self.all_scores.append(scores)
-
-        if current_length < self.min_len:
-            # penalizing end token before reaching minimum length
-            for hyp_idx in range(scores.size(0)):
-                scores[hyp_idx][self.end_index] = neginf()
 
         if len(self.hyp_ids) == 0:
             # the scores for the first step is simply the
@@ -191,8 +177,8 @@ class Beam:
             beam_scores = scores + prev_scores
 
             for idx in range(self.token_ids[-1].size(0)):
-                if self.token_ids[-1][idx] == self.end_index:
-                    beam_scores[idx] = neginf()
+                if self.token_ids[-1][idx] == self.end_idx:
+                    beam_scores[idx] = -inf
 
         # flatten beam scores is vocab_size * beam_size
         flatten_beam_scores = beam_scores.view(-1)
@@ -208,15 +194,13 @@ class Beam:
 
         time_step = len(self.token_ids)
         for hyp_idx in range(self.beam_size):
-            if self.token_ids[-1][hyp_idx] == self.end_index or \
+            if self.token_ids[-1][hyp_idx] == self.end_idx or \
                     time_step == self.max_len - 1:
-                self.finished_hyps.append(
-                    Hypothesis(
-                        hyp_id=hyp_idx, 
-                        time_step=time_step,
-                        score=self.scores[hyp_idx] / (time_step + 1)))
+                self.results.append(
+                    Result(hyp_id=hyp_idx, time_step=time_step,
+                           score=self.scores[hyp_idx] / (time_step + 1)))
 
-                if len(self.finished_hyps) == self.beam_size:
+                if len(self.results) == self.beam_size:
                     self.finished = True
                     break
 
@@ -224,7 +208,7 @@ class Beam:
         """
         Returns the tokens and scores of the best hypotesis.
         """
-        best_hyp = sorted(self.finished_hyps, key=lambda x: x.score)[0]
+        best_hyp = sorted(self.results, key=lambda x: x.score)[0]
         token_ids, scores = [], []
         hyp_id = best_hyp.hyp_id
 
@@ -232,10 +216,10 @@ class Beam:
             token_ids.insert(0, self.token_ids[ts][hyp_id])
             scores.insert(0, self.all_scores[ts][hyp_id].unsqueeze(0))
             hyp_id = int(self.hyp_ids[ts - 1][hyp_id])
-        
+
         # creating a tensor of size `size` at first dimension, so
         # it can be concatenated with the results of other beams
-        padded_preds = torch.tensor(self.pad_index).expand(size)
+        padded_preds = torch.tensor(self.pad_idx).expand(size)
 
         # apparently cloning is required after expand when
         # performing in-place operations

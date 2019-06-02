@@ -22,8 +22,8 @@ from beam import setup_beam_args, beam_search
 
 from data import (
     PAD, END,
-    ids2text, 
-    text2ids, 
+    ids2text,
+    text2ids,
     get_special_indices)
 
 from model import create_model, setup_model_args
@@ -35,7 +35,7 @@ def setup_eval_args():
     """
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--model_dir', 
+        '--model_dir',
         type=str,
         default=None,
         help='Path of the model file.')
@@ -60,10 +60,10 @@ def translate(text, model, fields, vocabs, indices, beam_size,
     SRC, TRG = fields
     ids = text2ids(text, SRC)
     _, preds = beam_search(
-        model=model, 
-        inputs=ids, 
+        model=model,
+        inputs=ids,
         indices=indices,
-        beam_size=beam_size, 
+        beam_size=beam_size,
         device=device)
     output = ids2text([preds.squeeze()], TRG)[0]
 
@@ -72,19 +72,19 @@ def translate(text, model, fields, vocabs, indices, beam_size,
 
 def main():
     args = setup_eval_args()
-    device = torch.device('cuda' if args.cuda else 'cpu') 
+    device = torch.device('cuda' if args.cuda else 'cpu')
 
-    state_dict = torch.load(join(args.model_dir, 'model.pt'), 
-        map_location=device)
-    fields = torch.load(join(args.model_dir, 'fields.pt'), 
-        map_location=device)
+    state_dict = torch.load(join(args.model_dir, 'model.pt'),
+                            map_location=device)
+    fields = torch.load(join(args.model_dir, 'fields.pt'),
+                        map_location=device)
 
     SRC, TRG = fields['src'], fields['trg']
 
     fields = SRC, TRG
     vocabs = SRC.vocab, TRG.vocab
     indices = get_special_indices(fields)
-    
+
     model = create_model(args, fields, device)
     model.load_state_dict(state_dict['model'])
     model.eval()
@@ -96,19 +96,15 @@ def main():
             print()
             text = input()
             output = translate(
-                text=text, 
-                model=model,
-                fields=fields, 
-                vocabs=vocabs,
-                indices=indices, 
-                beam_size=args.beam_size,
-                device=device)
+                text=text, model=model, fields=fields,
+                vocabs=vocabs, indices=indices,
+                beam_size=args.beam_size, device=device)
             print(output)
             print()
-            
+
         except KeyboardInterrupt:
             break
-    
+
 
 if __name__ == '__main__':
     main()
