@@ -67,7 +67,7 @@ def setup_train_args():
     parser.add_argument(
         '--learning_rate',
         type=float,
-        default=10,
+        default=1,
         help='Learning rate for the model.')
     parser.add_argument(
         '--model_dir',
@@ -133,7 +133,7 @@ def create_optimizer(args, parameters, finetune=False):
     optimizer = SGD(lr=args.learning_rate, weight_decay=1e-6,
                     params=parameters, momentum=0.9, 
                     nesterov=True)
-                    
+
     return optimizer
 
 
@@ -226,9 +226,12 @@ def train_step(model, criterion, optimizer, batch, indices):
         criterion=criterion,
         pad_idx=indices[3])
 
-    # clipping gradients enhances sgd performance
-    clip_grad_norm_(model.parameters(), 0.25)
     loss.backward()
+
+    # clipping gradients enhances sgd performance
+    # and prevents exploding gradient problem
+    clip_grad_norm_(model.parameters(), 0.25)
+
     optimizer.step()
 
     return loss.item(), accuracy
@@ -285,7 +288,8 @@ def train(model, datasets, fields, args, device):
         loop.set_description('{}'.format(epoch))
         model.train()
 
-        scheduler = CosineAnnealingLR(optimizer, len(train))
+        scheduler = CosineAnnealingLR(
+            optimizer, len(train), eta_min=1e-5)
 
         for batch in loop:
             loss, accuracy = train_step(

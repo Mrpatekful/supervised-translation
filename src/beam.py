@@ -48,14 +48,14 @@ def select_hidden_states(hidden_states, indices):
     return hidden_states
 
 
-def beam_search(model, inputs, indices, beam_size, device,
-                min_len=3, max_len=50):
+def beam_search(model, inputs, indices, beam_size, device, 
+                max_len=50):
     """
     Applies beam search decoding on the provided inputs.
     Implementation is based on `facebookresearch ParlAI`
     and `PyTorch-OpenNMT`.
     """
-    batch_size = inputs.size(0)
+    batch_size = inputs.size(1)
     start_index, *_ = indices
 
     encoder_outputs, hidden_state = model.encoder(inputs)
@@ -69,7 +69,7 @@ def beam_search(model, inputs, indices, beam_size, device,
     # the decoder has beam_size * batch_size inputs
     decoder_input = torch.tensor(start_index).to(device)
     decoder_input = decoder_input.expand(
-        batch_size * beam_size, 1)
+        1, batch_size * beam_size)
 
     indices = torch.arange(batch_size).to(device)
     indices = indices.unsqueeze(1).repeat(
@@ -77,7 +77,7 @@ def beam_search(model, inputs, indices, beam_size, device,
 
     # each encoder output is copied beam_size times,
     # making `encoder_outputs` of size
-    # [batch_size * beam_size, seq_len, encoder_hidden_dim]
+    # [batch_size * beam_size, seq_len, hidden_size]
     encoder_outputs = encoder_outputs.index_select(0, indices)
     hidden_state = select_hidden_states(hidden_state, indices)
 
@@ -86,12 +86,12 @@ def beam_search(model, inputs, indices, beam_size, device,
             break
 
         logits, hidden_state = model.decoder(
-            inputs=decoder_input[:, -1:],
+            inputs=decoder_input[-1:],
             encoder_outputs=encoder_outputs,
             hidden_state=hidden_state)
 
-        logits = logits[:, -1:, :]
-        scores = log_softmax(logits, dim=2)
+        logits = logits[-1:]
+        scores = log_softmax(logits, dim=-1)
         scores = scores.view(batch_size, beam_size, -1)
 
         # each beam receives the corresponding score
@@ -121,7 +121,7 @@ def beam_search(model, inputs, indices, beam_size, device,
 
     top_preds = torch.cat(top_preds).view(batch_size, -1)
     top_scores = torch.cat(top_scores).view(
-        batch_size, top_preds.size(-1), -1)
+        batch_size, top_preds.size(-1), dim=-1)
 
     return top_scores, top_preds
 

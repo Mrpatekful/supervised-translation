@@ -76,8 +76,8 @@ def create_datasets(args, device):
         SRC = Field(
             pad_token=PAD,
             unk_token=UNK,
-            tokenize='spacy',
-            tokenizer_language='en_core_web_sm',
+            # tokenize='spacy',
+            # tokenizer_language='en_core_web_sm',
             lower=True)
 
         TRG = Field(
@@ -85,8 +85,8 @@ def create_datasets(args, device):
             eos_token=END,
             pad_token=PAD,
             unk_token=UNK,
-            tokenize='spacy',
-            tokenizer_language='de_core_news_sm',
+            # tokenize='spacy',
+            # tokenizer_language='de_core_news_sm',
             lower=True,
             is_target=True)
     else:
