@@ -23,9 +23,7 @@ from torch.nn.functional import (
     embedding)
 
 from torch.nn import (
-    GRU, Dropout,
-    Embedding, Linear,
-    Softmax, Parameter)
+    Linear, Softmax, Parameter)
 
 from torchnlp.nn import (
     WeightDropGRU, LockedDropout,
@@ -119,13 +117,7 @@ class Seq2Seq(Module):
         scores = []
         preds = self.start_idx.detach().expand(1, batch_size)
 
-        # computing weight dropout and regular dropout for
-        # each timestep
-        for layer in self.decoder.rnn:
-            layer.compute_mask()
-
-        for layer in self.decoder.dropout:
-            layer.compute_mask(batch_size)
+        self.decoder.compute_dropout_masks(batch_size)
 
         for idx in range(max_len):
             # if targets are provided and training then apply
@@ -167,11 +159,12 @@ class Encoder(Module):
             embedding_dim=input_size,
             padding_idx=pad_idx)
 
-        self.dropout = ModuleList([
-            LockedDropout(p=0.3, in_features=input_size),
-            LockedDropout(p=0.3, in_features=hidden_size)
-        ])
+        self.input_dropout = LockedDropout(
+            p=0.3, in_features=input_size)
 
+        self.hidden_dropout = LockedDropout(
+            p=0.3, in_features=hidden_size)
+        
         self.merge = Linear(
             in_features=hidden_size * 2,
             out_features=hidden_size,
@@ -197,7 +190,7 @@ class Encoder(Module):
         Computes the embeddings and runs them through an RNN.
         """
         embedded = self.embedding(inputs)
-        embedded = self.dropout[0](embedded)
+        embedded = self.input_dropout(embedded)
 
         outputs, hidden_state = self.rnn[0](embedded)
 
@@ -208,7 +201,7 @@ class Encoder(Module):
 
         for layer in self.rnn[1:]:
             outputs, hidden_state = layer(outputs)
-            outputs = self.dropout[1](outputs)
+            outputs = self.hidden_dropout(outputs)
             hidden_states.append(hidden_state)
 
         outputs_t = outputs.transpose(0, 1)
@@ -229,7 +222,7 @@ class Decoder(Module):
         self.input_size = input_size
         self.vocab_size = vocab_size
 
-        self.embedding = Embedding(
+        self.embedding = DropoutEmbedding(
             num_embeddings=vocab_size,
             embedding_dim=input_size)
 
@@ -248,16 +241,19 @@ class Decoder(Module):
         # an individual dropout must be created for
         # each layer so their mask can be shared
         # for each time step
-        self.dropout = ModuleList([
-            LockedDropout(p=0.3, in_features=input_size)] + [
-            LockedDropout(p=0.3, in_features=hidden_size) 
-            for _ in range(len(self.rnn))] + [
-            LockedDropout(p=0.3, 
-                in_features=num_softmax * input_size),
+        self.input_dropout = LockedDropout(
+            p=0.4, in_features=input_size)
+
+        self.hidden_dropout = ModuleList([
+            LockedDropout(p=0.4, in_features=hidden_size) 
+            for _ in range(len(self.rnn))
         ])
 
-        self.attn = Attention(
-            hidden_size=hidden_size)
+        self.latent_dropout = LockedDropout(
+            p=0.4, in_features=num_softmax * input_size)
+
+        # luong style general attention layer
+        self.attn = Attention(hidden_size=hidden_size)
 
         # weight matrices for mixture of softmaxes
         self.prior = Linear(
@@ -273,7 +269,7 @@ class Decoder(Module):
         # instead of torch.nn.Linear so
         # shared embedding can be implemented easily
         self.out_bias = Parameter(torch.zeros((vocab_size, )))
-        self.out_weight = self.embedding.weight
+        self.out_weight = self.embedding.raw_weight
 
     def forward(self, inputs, encoder_outputs, prev_hiddens,
                 attn_mask=None):
@@ -281,19 +277,17 @@ class Decoder(Module):
         Applies decoding with attention mechanism, mixture
         of sofmaxes and multi dropout during training.
         """
-        embedded = self.embedding(inputs)
+        embedded = self.embedding(inputs, compute_mask=False)
         # each dropout layer is called with `compute_mask=False`
         # so the same dropout mask will be used for each timestep
-        output = self.dropout[0](
-            embedded, compute_mask=False)
+        output = self.input_dropout(embedded, compute_mask=False)
 
         hidden_states = []
-        for idx, layer in enumerate(self.rnn):
+        for idx, (layer, dropout) in enumerate(zip(
+                self.rnn, self.hidden_dropout)):
             output, hidden_state = layer(
-                output, prev_hiddens[idx], 
-                compute_mask=False)
-            output = self.dropout[idx + 1](
-                output, compute_mask=False)
+                output, prev_hiddens[idx], ompute_mask=False)
+            output = dropout(output, compute_mask=False)
             hidden_states.append(hidden_state)
 
         output, _ = self.attn(
@@ -303,8 +297,7 @@ class Decoder(Module):
             attn_mask=attn_mask)
 
         latent = torch.tanh(self.latent(output))
-        latent = self.dropout[len(self.rnn) + 1](
-            latent, compute_mask=False)
+        latent = self.latent_dropout(latent, compute_mask=False)
         latent = latent.view(-1, self.input_size)
 
         # computing softmaxes from contexts
@@ -326,6 +319,20 @@ class Decoder(Module):
 
         return log_probs, hidden_states
 
+    def compute_dropout_masks(self, batch_size):
+        """
+        Computes the dropout masks for the layers of the decoder.
+        """
+        for layer in self.rnn:
+            layer.compute_mask()
+
+        for layer in self.hidden_dropout:
+            layer.compute_mask(batch_size)
+
+        self.input_dropout.compute_mask(batch_size)
+        self.latent_dropout.compute_mask(batch_size)
+        self.embedding.compute_mask()
+
 
 class Attention(Module):
     """
@@ -346,18 +353,21 @@ class Attention(Module):
             out_features=hidden_size,
             bias=False)
 
-    def forward(self, decoder_output, hidden_state, encoder_outputs,
-                attn_mask=None):
+    def forward(self, decoder_output, hidden_state, 
+                encoder_outputs, attn_mask=None):
         """
-        Applies attention by creating the weighted context vector.
-        Implementation is based on `IBM/pytorch-seq2seq`.
+        Applies attention by creating the weighted 
+        context vector. Implementation is based on 
+        `IBM/pytorch-seq2seq`.
         """
-        # converting sequence first format to batch first for bmm
+        # converting sequence first format to 
+        # batch first for bmm
         hidden_state = hidden_state.transpose(0, 1)
         hidden_state = self.project(hidden_state)
 
         encoder_outputs_t = encoder_outputs.transpose(1, 2)
-        attn_scores = torch.bmm(hidden_state, encoder_outputs_t)
+        attn_scores = torch.bmm(
+            hidden_state, encoder_outputs_t)
 
         # applying mask on padded values of the input
         # NOTE during beam search mask might not be provided
@@ -367,11 +377,13 @@ class Attention(Module):
             attn_scores = attn_scores.unsqueeze(1)
 
         attn_weights = softmax(attn_scores, dim=-1)
-        attn_applied = torch.bmm(attn_weights, encoder_outputs)
+        attn_applied = torch.bmm(
+            attn_weights, encoder_outputs)
         # converting back to sequence first format
         attn_applied = attn_applied.transpose(0, 1)
 
-        stacked = torch.cat([decoder_output, attn_applied], dim=-1)
+        stacked = torch.cat(
+            [decoder_output, attn_applied], dim=-1)
         outputs = self.combine(stacked)
 
         return outputs, attn_weights

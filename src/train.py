@@ -57,7 +57,7 @@ def setup_train_args():
     parser.add_argument(
         '--epochs',
         type=int,
-        default=500,
+        default=300,
         help='Maximum number of epochs for training.')
     parser.add_argument(
         '--cuda',
@@ -213,7 +213,7 @@ def train_step(model, criterion, optimizer, batch, indices):
     # the first token is the sos which is also
     # created by the decoder internally
     targets = targets[1:]
-    max_len = targets.size(1)
+    max_len = targets.size(0)
 
     outputs = model(
         inputs=inputs,
@@ -244,7 +244,7 @@ def eval_step(model, criterion, batch, indices, device):
     inputs, targets = batch.src, batch.trg
 
     targets = targets[1:]
-    max_len = targets.size(1)
+    max_len = targets.size(0)
 
     outputs = model(inputs=inputs, max_len=max_len)
 
@@ -274,13 +274,14 @@ def train(model, datasets, fields, args, device):
 
     # creating optimizer with learning rate schedule
     optimizer = create_optimizer(args, model.parameters())
-
+    
     prev_avg_loss = load_state(
         model, optimizer, args.model_dir, device)
 
-    if args.mixed and args.cuda:
+    # TODO apex bug with weight drop
+    if args.mixed and args.cuda and False:
         model, optimizer = amp.initialize(
-            model, optimizer, opt_level='01')
+            model, optimizer, opt_level='O1')
 
     for epoch in range(args.epochs):
         # running training loop
@@ -289,7 +290,7 @@ def train(model, datasets, fields, args, device):
         model.train()
 
         scheduler = CosineAnnealingLR(
-            optimizer, len(train), eta_min=1e-5)
+            optimizer, len(train), eta_min=1e-6)
 
         for batch in loop:
             loss, accuracy = train_step(
