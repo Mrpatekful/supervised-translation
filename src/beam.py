@@ -88,7 +88,7 @@ def beam_search(model, inputs, indices, beam_size, device,
         logits, hidden_state = model.decoder(
             inputs=decoder_input[-1:],
             encoder_outputs=encoder_outputs,
-            hidden_state=hidden_state)
+            prev_hiddens=hidden_state)
 
         logits = logits[-1:]
         scores = log_softmax(logits, dim=-1)
@@ -108,11 +108,11 @@ def beam_search(model, inputs, indices, beam_size, device,
         ])
 
         hidden_state = select_hidden_states(hidden_state, indices)
-        decoder_input = torch.index_select(decoder_input, 0, indices)
+        decoder_input = torch.index_select(decoder_input, 1, indices)
 
         prev_output = torch.cat([b.token_ids[-1] for b in beams])
-        prev_output = prev_output.unsqueeze(-1)
-        decoder_input = torch.cat([decoder_input, prev_output], dim=-1)
+        prev_output = prev_output.unsqueeze(0)
+        decoder_input = torch.cat([decoder_input, prev_output])
 
     # merging the best result from the beams into
     # a single batch of outputs
@@ -121,7 +121,7 @@ def beam_search(model, inputs, indices, beam_size, device,
 
     top_preds = torch.cat(top_preds).view(batch_size, -1)
     top_scores = torch.cat(top_scores).view(
-        batch_size, top_preds.size(-1), dim=-1)
+        batch_size, top_preds.size(-1), -1)
 
     return top_scores, top_preds
 
@@ -137,7 +137,7 @@ class Beam:
         self.max_len = max_len
         self.finished = False
 
-        self.pad_idx, self.end_idx, self.start_idx = indices
+        self.start_idx, self.end_idx, self.pad_idx, *_ = indices
 
         # scores of each candidate of the beam
         self.scores = torch.zeros(beam_size).to(device)
