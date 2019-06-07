@@ -78,7 +78,8 @@ def create_datasets(args, device):
             unk_token=UNK,
             # tokenize='spacy',
             # tokenizer_language='en_core_web_sm',
-            lower=True)
+            lower=True,
+            batch_first=True)
 
         TRG = Field(
             init_token=START,
@@ -88,6 +89,7 @@ def create_datasets(args, device):
             # tokenize='spacy',
             # tokenizer_language='de_core_news_sm',
             lower=True,
+            batch_first=True,
             is_target=True)
     else:
         print('Loading fields from {}'.format(fields_path))

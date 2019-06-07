@@ -55,7 +55,7 @@ def beam_search(model, inputs, indices, beam_size, device,
     Implementation is based on `facebookresearch ParlAI`
     and `PyTorch-OpenNMT`.
     """
-    batch_size = inputs.size(1)
+    batch_size = inputs.size(0)
     start_index, *_ = indices
 
     encoder_outputs, hidden_state = model.encoder(inputs)
@@ -69,7 +69,7 @@ def beam_search(model, inputs, indices, beam_size, device,
     # the decoder has beam_size * batch_size inputs
     decoder_input = torch.tensor(start_index).to(device)
     decoder_input = decoder_input.expand(
-        1, batch_size * beam_size)
+        batch_size * beam_size, 1)
 
     indices = torch.arange(batch_size).to(device)
     indices = indices.unsqueeze(1).repeat(
@@ -86,11 +86,11 @@ def beam_search(model, inputs, indices, beam_size, device,
             break
 
         logits, hidden_state = model.decoder(
-            inputs=decoder_input[-1:],
+            inputs=decoder_input[:, -1:],
             encoder_outputs=encoder_outputs,
             prev_hiddens=hidden_state)
 
-        logits = logits[-1:]
+        logits = logits[:, -1:]
         scores = log_softmax(logits, dim=-1)
         scores = scores.view(batch_size, beam_size, -1)
 

@@ -123,7 +123,7 @@ def load_state(model, optimizer, path, device):
         return state_dict['avg_loss']
 
     except FileNotFoundError:
-        return np.inf
+        return -np.inf
 
 
 def create_optimizer(args, parameters, finetune=False):
@@ -212,8 +212,8 @@ def train_step(model, criterion, optimizer, batch, indices):
 
     # the first token is the sos which is also
     # created by the decoder internally
-    targets = targets[1:]
-    max_len = targets.size(0)
+    targets = targets[:, 1:].contiguous()
+    max_len = targets.size(1)
 
     outputs = model(
         inputs=inputs,
@@ -230,7 +230,7 @@ def train_step(model, criterion, optimizer, batch, indices):
 
     # clipping gradients enhances sgd performance
     # and prevents exploding gradient problem
-    clip_grad_norm_(model.parameters(), 0.25)
+    clip_grad_norm_(model.parameters(), 0.5)
 
     optimizer.step()
 
@@ -243,7 +243,7 @@ def eval_step(model, criterion, batch, indices, device):
     """
     inputs, targets = batch.src, batch.trg
 
-    targets = targets[1:]
+    targets = targets[:, 1:].contiguous()
     max_len = targets.size(0)
 
     outputs = model(inputs=inputs, max_len=max_len)
@@ -275,7 +275,7 @@ def train(model, datasets, fields, args, device):
     # creating optimizer with learning rate schedule
     optimizer = create_optimizer(args, model.parameters())
     
-    prev_avg_loss = load_state(
+    best_avg_acc = load_state(
         model, optimizer, args.model_dir, device)
 
     # TODO apex bug with weight drop
@@ -308,7 +308,7 @@ def train(model, datasets, fields, args, device):
         # running validation loop
         loop = tqdm(val)
         model.eval()
-        avg_loss = []
+        avg_acc = []
 
         with torch.no_grad():
             for batch in loop:
@@ -319,16 +319,16 @@ def train(model, datasets, fields, args, device):
                     device=device,
                     batch=batch)
 
-                avg_loss.append(loss)
+                avg_acc.append(accuracy)
                 loop.set_postfix(ordered_dict=OrderedDict(
                     loss=loss, acc=accuracy))
 
-        avg_loss = sum(avg_loss) / len(avg_loss)
-        print('avg val loss: {:.4}'.format(avg_loss))
-        if avg_loss < prev_avg_loss:
+        avg_acc = sum(avg_acc) / len(avg_acc)
+        print('avg val loss: {:.4}'.format(avg_acc))
+        if avg_acc > best_avg_acc:
             save_state(
-                model, optimizer, avg_loss, args.model_dir)
-            prev_avg_loss = avg_loss
+                model, optimizer, avg_acc, args.model_dir)
+            best_avg_acc = avg_acc
 
     # running testing loop
     loop = tqdm(test)

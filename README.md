@@ -1,4 +1,4 @@
-# Neural machine translation (under development)
+# Neural machine translation
 
 Supervised neural machine translation on english-german multi30k
 dataset with seq2seq architecture from *[Sutskever et al. (2014)](https://arxiv.org/pdf/1409.3215.pdf)*, luong-style general attention

@@ -59,6 +59,7 @@ def translate(text, model, fields, vocabs, indices, beam_size,
     """
     SRC, TRG = fields
     ids = text2ids(text, SRC)
+    # _, preds = model(ids)
     _, preds = beam_search(
         model=model,
         inputs=ids,
@@ -89,7 +90,7 @@ def main():
     model.load_state_dict(state_dict['model'])
     model.eval()
 
-    print('Type a sentence. CTRL + C to escape.')
+    print('Type a sentence to translate. CTRL + C to escape.')
 
     while True:
         try:

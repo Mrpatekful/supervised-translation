@@ -96,10 +96,10 @@ class Seq2Seq(Module):
         Runs the inputs through the encoder-decoder model.
         """
         # inputs are expexted in sequence-first format
-        batch_size = inputs.size(1)
-        max_len = targets.size(0) if targets is not None else max_len
+        batch_size = inputs.size(0)
+        max_len = targets.size(1) if targets is not None else max_len
 
-        attn_mask = inputs.eq(self.pad_idx).t()
+        attn_mask = inputs.eq(self.pad_idx)
 
         # randomly masking input with unk during training
         # which makes the model more robust to unks during testing
@@ -115,10 +115,10 @@ class Seq2Seq(Module):
         encoder_outputs, hidden_states = self.encoder(inputs)
 
         scores = []
-        preds = self.start_idx.detach().expand(1, batch_size)
+        preds = self.start_idx.detach().expand(batch_size, 1)
 
         # precomputing embedding dropout mask for the decoder
-        # NOTE embedding dropout is harcoded 0.1
+        # NOTE embedding dropout is hardcoded 0.1
         embed = self.decoder.embedding
         embed_mask = embed.weight.new_empty((embed.weight.size(0), 1))
         embed_mask.bernoulli_(0.9).expand_as(embed.weight) / 0.9
@@ -126,11 +126,11 @@ class Seq2Seq(Module):
         for idx in range(max_len):
             # if targets are provided and training then apply
             # teacher forcing 50% of the time
-            if targets is not None and random.random() > 0.5 and \
-                    self.training:
-                prev_output = targets[idx].unsqueeze(0)
+            if targets is not None and self.training and \
+                    random.random() > 0.5:
+                prev_output = targets[:, idx].unsqueeze(1)
             else:
-                prev_output = preds[-1:]
+                prev_output = preds[:, -1:]
 
             step_scores, hidden_states = self.decoder(
                 inputs=prev_output,
@@ -141,11 +141,11 @@ class Seq2Seq(Module):
 
             _, step_preds = step_scores.max(dim=-1)
 
-            preds = torch.cat([preds, step_preds])
+            preds = torch.cat([preds, step_preds], dim=1)
             scores.append(step_scores)
 
-        scores = torch.cat(scores)
-        preds = preds.narrow(0, 1, preds.size(0) - 1)
+        scores = torch.cat(scores, dim=1)
+        preds = preds.narrow(1, 1, preds.size(1) - 1)
 
         return scores, preds
 
@@ -164,7 +164,8 @@ class Encoder(Module):
             embedding_dim=input_size,
             padding_idx=pad_idx)
 
-        self.dropout = LockedDropout(p=0.3)
+        self.dropout = LockedDropout(
+            p=0.3, batch_first=True)
 
         self.merge = Linear(
             in_features=hidden_size * 2,
@@ -176,9 +177,11 @@ class Encoder(Module):
         self.rnn = ModuleList([
             GRU(input_size=input_size,
                 hidden_size=hidden_size,
-                bidirectional=True)] + [
+                bidirectional=True,
+                batch_first=True)] + [
             GRU(input_size=hidden_size,
-                hidden_size=hidden_size)
+                hidden_size=hidden_size,
+                batch_first=True)
             for _ in range(2)
         ])
 
@@ -201,9 +204,7 @@ class Encoder(Module):
             outputs = self.dropout(outputs)
             hidden_states.append(hidden_state)
 
-        outputs_t = outputs.transpose(0, 1)
-
-        return outputs_t, hidden_states
+        return outputs, hidden_states
 
 
 class Decoder(Module):
@@ -225,9 +226,11 @@ class Decoder(Module):
 
         self.rnn = ModuleList([
             GRU(input_size=input_size,
-                hidden_size=hidden_size)] + [
+                hidden_size=hidden_size,
+                batch_first=True)] + [
             GRU(input_size=hidden_size,
-                hidden_size=hidden_size)
+                hidden_size=hidden_size,
+                batch_first=True)
             for _ in range(2)
         ])
 
@@ -290,7 +293,7 @@ class Decoder(Module):
         prior = softmax(prior, dim=-1).unsqueeze(2)
 
         probs = (softmaxes * prior).sum(1).view(
-            1, inputs.size(1), self.vocab_size)
+            inputs.size(0), 1, self.vocab_size)
         # adding 1e-8 for numerical stability before
         # transforming to log space
         log_probs = probs.add_(1e-8).log()
@@ -324,11 +327,9 @@ class Attention(Module):
         context vector. Implementation is based on 
         `IBM/pytorch-seq2seq`.
         """
-        # converting sequence first format to 
-        # batch first for bmm
-        hidden_state = hidden_state.transpose(0, 1)
         hidden_state = self.project(hidden_state)
-
+        hidden_state = hidden_state.transpose(0, 1)
+        
         encoder_outputs_t = encoder_outputs.transpose(1, 2)
         attn_scores = torch.bmm(
             hidden_state, encoder_outputs_t)
@@ -343,8 +344,6 @@ class Attention(Module):
         attn_weights = softmax(attn_scores, dim=-1)
         attn_applied = torch.bmm(
             attn_weights, encoder_outputs)
-        # converting back to sequence first format
-        attn_applied = attn_applied.transpose(0, 1)
 
         stacked = torch.cat(
             [decoder_output, attn_applied], dim=-1)
