@@ -279,7 +279,7 @@ def train(model, datasets, fields, args, device):
         model, optimizer, args.model_dir, device)
 
     # TODO apex bug with weight drop
-    if args.mixed and args.cuda and False:
+    if args.mixed and args.cuda:
         model, optimizer = amp.initialize(
             model, optimizer, opt_level='O1')
 

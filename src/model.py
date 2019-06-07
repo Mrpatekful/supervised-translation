@@ -23,11 +23,11 @@ from torch.nn.functional import (
     embedding)
 
 from torch.nn import (
-    Linear, Softmax, Parameter)
+    Linear, Softmax, Parameter, 
+    GRU, Dropout, Embedding)
 
 from torchnlp.nn import (
-    WeightDropGRU, LockedDropout,
-    DropoutEmbedding)
+    LockedDropout, DropoutEmbedding)
 
 from data import get_special_indices
 
@@ -117,7 +117,11 @@ class Seq2Seq(Module):
         scores = []
         preds = self.start_idx.detach().expand(1, batch_size)
 
-        self.decoder.compute_dropout_masks(batch_size)
+        # precomputing embedding dropout mask for the decoder
+        # NOTE embedding dropout is harcoded 0.1
+        embed = self.decoder.embedding
+        embed_mask = embed.weight.new_empty((embed.weight.size(0), 1))
+        embed_mask.bernoulli_(0.9).expand_as(embed.weight) / 0.9
 
         for idx in range(max_len):
             # if targets are provided and training then apply
@@ -132,7 +136,8 @@ class Seq2Seq(Module):
                 inputs=prev_output,
                 encoder_outputs=encoder_outputs,
                 prev_hiddens=hidden_states,
-                attn_mask=attn_mask)
+                attn_mask=attn_mask,
+                embed_mask=embed_mask)
 
             _, step_preds = step_scores.max(dim=-1)
 
@@ -159,12 +164,8 @@ class Encoder(Module):
             embedding_dim=input_size,
             padding_idx=pad_idx)
 
-        self.input_dropout = LockedDropout(
-            p=0.3, in_features=input_size)
+        self.dropout = LockedDropout(p=0.3)
 
-        self.hidden_dropout = LockedDropout(
-            p=0.3, in_features=hidden_size)
-        
         self.merge = Linear(
             in_features=hidden_size * 2,
             out_features=hidden_size,
@@ -173,15 +174,11 @@ class Encoder(Module):
         # creating rnn layer as module list so locked
         # dropout can be applied between each layer
         self.rnn = ModuleList([
-            WeightDropGRU(
-                input_size=input_size,
+            GRU(input_size=input_size,
                 hidden_size=hidden_size,
-                bidirectional=True,
-                weight_dropout=0.5)] + [
-            WeightDropGRU(
-                input_size=hidden_size,
-                hidden_size=hidden_size,
-                weight_dropout=0.5)
+                bidirectional=True)] + [
+            GRU(input_size=hidden_size,
+                hidden_size=hidden_size)
             for _ in range(2)
         ])
 
@@ -190,7 +187,7 @@ class Encoder(Module):
         Computes the embeddings and runs them through an RNN.
         """
         embedded = self.embedding(inputs)
-        embedded = self.input_dropout(embedded)
+        embedded = self.dropout(embedded)
 
         outputs, hidden_state = self.rnn[0](embedded)
 
@@ -201,7 +198,7 @@ class Encoder(Module):
 
         for layer in self.rnn[1:]:
             outputs, hidden_state = layer(outputs)
-            outputs = self.hidden_dropout(outputs)
+            outputs = self.dropout(outputs)
             hidden_states.append(hidden_state)
 
         outputs_t = outputs.transpose(0, 1)
@@ -227,30 +224,14 @@ class Decoder(Module):
             embedding_dim=input_size)
 
         self.rnn = ModuleList([
-            WeightDropGRU(
-                input_size=input_size,
-                hidden_size=hidden_size,
-                weight_dropout=0.5)] + [
-            WeightDropGRU(
-                input_size=hidden_size,
-                hidden_size=hidden_size,
-                weight_dropout=0.5)
+            GRU(input_size=input_size,
+                hidden_size=hidden_size)] + [
+            GRU(input_size=hidden_size,
+                hidden_size=hidden_size)
             for _ in range(2)
         ])
 
-        # an individual dropout must be created for
-        # each layer so their mask can be shared
-        # for each time step
-        self.input_dropout = LockedDropout(
-            p=0.4, in_features=input_size)
-
-        self.hidden_dropout = ModuleList([
-            LockedDropout(p=0.4, in_features=hidden_size) 
-            for _ in range(len(self.rnn))
-        ])
-
-        self.latent_dropout = LockedDropout(
-            p=0.4, in_features=num_softmax * input_size)
+        self.dropout = Dropout(p=0.3)
 
         # luong style general attention layer
         self.attn = Attention(hidden_size=hidden_size)
@@ -269,25 +250,22 @@ class Decoder(Module):
         # instead of torch.nn.Linear so
         # shared embedding can be implemented easily
         self.out_bias = Parameter(torch.zeros((vocab_size, )))
-        self.out_weight = self.embedding.raw_weight
+        self.out_weight = self.embedding.weight
 
     def forward(self, inputs, encoder_outputs, prev_hiddens,
-                attn_mask=None):
+                attn_mask=None, embed_mask=None):
         """
         Applies decoding with attention mechanism, mixture
         of sofmaxes and multi dropout during training.
         """
-        embedded = self.embedding(inputs, compute_mask=False)
-        # each dropout layer is called with `compute_mask=False`
-        # so the same dropout mask will be used for each timestep
-        output = self.input_dropout(embedded, compute_mask=False)
+        embedded = self.embedding(inputs, mask=embed_mask)
+        output = self.dropout(embedded)
 
         hidden_states = []
-        for idx, (layer, dropout) in enumerate(zip(
-                self.rnn, self.hidden_dropout)):
+        for idx, layer in enumerate(self.rnn):
             output, hidden_state = layer(
-                output, prev_hiddens[idx], ompute_mask=False)
-            output = dropout(output, compute_mask=False)
+                output, prev_hiddens[idx])
+            output = self.dropout(output)
             hidden_states.append(hidden_state)
 
         output, _ = self.attn(
@@ -297,7 +275,7 @@ class Decoder(Module):
             attn_mask=attn_mask)
 
         latent = torch.tanh(self.latent(output))
-        latent = self.latent_dropout(latent, compute_mask=False)
+        latent = self.dropout(latent)
         latent = latent.view(-1, self.input_size)
 
         # computing softmaxes from contexts
@@ -318,20 +296,6 @@ class Decoder(Module):
         log_probs = probs.add_(1e-8).log()
 
         return log_probs, hidden_states
-
-    def compute_dropout_masks(self, batch_size):
-        """
-        Computes the dropout masks for the layers of the decoder.
-        """
-        for layer in self.rnn:
-            layer.compute_mask()
-
-        for layer in self.hidden_dropout:
-            layer.compute_mask(batch_size)
-
-        self.input_dropout.compute_mask(batch_size)
-        self.latent_dropout.compute_mask(batch_size)
-        self.embedding.compute_mask()
 
 
 class Attention(Module):
