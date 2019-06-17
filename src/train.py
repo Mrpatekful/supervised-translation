@@ -218,11 +218,13 @@ def compute_bleu(outputs, targets, indices, fields):
     _, end_idx, _, trg_pad_idx, _ = indices
     ignored = end_idx, trg_pad_idx
 
-    hypotheses = ids2text(outputs, TRG, ignored)
-    references = ids2text(targets, TRG, ignored)
-    print(len(hypotheses))
+    hyps = ids2text(outputs, TRG, ignored)
+    hyps = list(map(lambda x: ' '.join(x), hyps))
 
-    return get_moses_multi_bleu(hypotheses, references)
+    refs = ids2text(targets, TRG, ignored)
+    refs = list(map(lambda x: ' '.join(x), refs))
+
+    return get_moses_multi_bleu(hyps, refs)
 
 
 def main():
@@ -283,7 +285,7 @@ def main():
 
         # clipping gradients enhances sgd performance
         # and prevents exploding gradient problem
-        # clip_grad_norm_(model.parameters(), 0.5)
+        clip_grad_norm_(model.parameters(), 0.5)
 
         optimizer.step()
 
