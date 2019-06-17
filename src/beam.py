@@ -90,7 +90,7 @@ def beam_search(model, inputs, indices, beam_size, device,
             encoder_outputs=encoder_outputs,
             prev_hiddens=hidden_state)
 
-        logits = logits[:, -1:]
+        logits = logits[:, -1:, :]
         scores = log_softmax(logits, dim=-1)
         scores = scores.view(batch_size, beam_size, -1)
 
@@ -108,11 +108,11 @@ def beam_search(model, inputs, indices, beam_size, device,
         ])
 
         hidden_state = select_hidden_states(hidden_state, indices)
-        decoder_input = torch.index_select(decoder_input, 1, indices)
+        decoder_input = torch.index_select(decoder_input, 0, indices)
 
         prev_output = torch.cat([b.token_ids[-1] for b in beams])
-        prev_output = prev_output.unsqueeze(0)
-        decoder_input = torch.cat([decoder_input, prev_output])
+        prev_output = prev_output.unsqueeze(-1)
+        decoder_input = torch.cat([decoder_input, prev_output], dim=-1)
 
     # merging the best result from the beams into
     # a single batch of outputs

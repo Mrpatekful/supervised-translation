@@ -51,26 +51,6 @@ def setup_eval_args():
     return parser.parse_args()
 
 
-@torch.no_grad()
-def translate(text, model, fields, vocabs, indices, beam_size,
-              device):
-    """
-    Translates the given text with beam search.
-    """
-    SRC, TRG = fields
-    ids = text2ids(text, SRC)
-    # _, preds = model(ids)
-    _, preds = beam_search(
-        model=model,
-        inputs=ids,
-        indices=indices,
-        beam_size=beam_size,
-        device=device)
-    output = ids2text([preds.squeeze()], TRG)[0]
-
-    return ' '.join(w for w in output if w not in (PAD, END))
-
-
 def main():
     args = setup_eval_args()
     device = torch.device('cuda' if args.cuda else 'cpu')
@@ -82,13 +62,27 @@ def main():
 
     SRC, TRG = fields['src'], fields['trg']
 
-    fields = SRC, TRG
-    vocabs = SRC.vocab, TRG.vocab
-    indices = get_special_indices(fields)
+    indices = get_special_indices((SRC, TRG))
 
-    model = create_model(args, fields, device)
+    model = create_model(args, (SRC, TRG), device)
     model.load_state_dict(state_dict['model'])
     model.eval()
+
+    @torch.no_grad()
+    def translate(text):
+        """
+        Translates the given text with beam search.
+        """
+        ids = text2ids(text, SRC)
+        _, preds = beam_search(
+            model=model,
+            inputs=ids,
+            indices=indices,
+            beam_size=args.beam_size,
+            device=device)
+        output = ids2text([preds.squeeze()], TRG)[0]
+
+        return ' '.join(w for w in output if w not in (PAD, END))
 
     print('Type a sentence to translate. CTRL + C to escape.')
 
@@ -96,10 +90,7 @@ def main():
         try:
             print()
             text = input()
-            output = translate(
-                text=text, model=model, fields=fields,
-                vocabs=vocabs, indices=indices,
-                beam_size=args.beam_size, device=device)
+            output = translate(text)
             print(output)
             print()
 

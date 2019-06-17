@@ -26,8 +26,7 @@ from torch.nn import (
     Linear, Softmax, Parameter, 
     GRU, Dropout, Embedding)
 
-from torchnlp.nn import (
-    LockedDropout, DropoutEmbedding)
+from torchnlp.nn import LockedDropout
 
 from data import get_special_indices
 
@@ -55,7 +54,8 @@ def create_model(args, fields, device):
     SRC, TRG = fields
     indices = get_special_indices(fields)
 
-    tensor_indices = [torch.tensor(i).to(device) for i in indices]
+    tensor_indices = [
+        torch.tensor(i).to(device) for i in indices]
 
     model = Seq2Seq(
         source_vocab_size=len(SRC.vocab),
@@ -66,13 +66,37 @@ def create_model(args, fields, device):
     return model
 
 
+def embeddeding_dropout(embed, inputs, training, mask=None, p=0.1):
+    """
+    Applies dropout to the embedding layer based on
+    https://arxiv.org/pdf/1512.05287.pdf. The code is
+    based on salesforce/awd-lstm-lm.
+    """
+    if not training:
+        masked_embed_weight = embed.weight
+    if mask is not None:
+        # masks might be provided, which is useful for shared
+        # dropout masks over the whole sequence of inputs
+        masked_embed_weight = mask * embed.weight
+    elif p:
+        mask = embed.weight.new_empty((embed.weight.size(0), 1))
+        mask.bernoulli_(1 - p).expand_as(embed.weight) / (1 - p)
+        masked_embed_weight = mask * embed.weight
+    else:
+        masked_embed_weight = embed.weight
+
+    return embedding(
+        inputs, masked_embed_weight, embed.padding_idx, 
+        embed.max_norm, embed.norm_type,
+        embed.scale_grad_by_freq, embed.sparse)
+
+
 class Seq2Seq(Module):
     """
     The sequence-to-sequence model.
     """
 
-    def __init__(self, embedding_size,
-                 hidden_size, indices,
+    def __init__(self, embedding_size, hidden_size, indices,
                  source_vocab_size, target_vocab_size, **kwargs):
         super().__init__()
 
@@ -141,7 +165,7 @@ class Seq2Seq(Module):
 
             _, step_preds = step_scores.max(dim=-1)
 
-            preds = torch.cat([preds, step_preds], dim=1)
+            preds = torch.cat([preds, step_preds], dim=-1)
             scores.append(step_scores)
 
         scores = torch.cat(scores, dim=1)
@@ -159,13 +183,12 @@ class Encoder(Module):
                  vocab_size):
         super().__init__()
 
-        self.embedding = DropoutEmbedding(
+        self.embedding = Embedding(
             num_embeddings=vocab_size,
             embedding_dim=input_size,
             padding_idx=pad_idx)
 
-        self.dropout = LockedDropout(
-            p=0.3, batch_first=True)
+        self.dropout = Dropout(p=0.3)
 
         self.merge = Linear(
             in_features=hidden_size * 2,
@@ -189,6 +212,9 @@ class Encoder(Module):
         """
         Computes the embeddings and runs them through an RNN.
         """
+        embedded = embeddeding_dropout(
+            embed=self.embedding, inputs=inputs, 
+            training=self.training)
         embedded = self.embedding(inputs)
         embedded = self.dropout(embedded)
 
@@ -220,9 +246,11 @@ class Decoder(Module):
         self.input_size = input_size
         self.vocab_size = vocab_size
 
-        self.embedding = DropoutEmbedding(
+        self.embedding = Embedding(
             num_embeddings=vocab_size,
             embedding_dim=input_size)
+
+        self.dropout = Dropout(p=0.3)
 
         self.rnn = ModuleList([
             GRU(input_size=input_size,
@@ -234,9 +262,6 @@ class Decoder(Module):
             for _ in range(2)
         ])
 
-        self.dropout = Dropout(p=0.3)
-
-        # luong style general attention layer
         self.attn = Attention(hidden_size=hidden_size)
 
         # weight matrices for mixture of softmaxes
@@ -260,8 +285,11 @@ class Decoder(Module):
         """
         Applies decoding with attention mechanism, mixture
         of sofmaxes and multi dropout during training.
+        MoS implementation is taken from 
         """
-        embedded = self.embedding(inputs, mask=embed_mask)
+        embedded = embeddeding_dropout(
+            embed=self.embedding, inputs=inputs, 
+            training=self.training, mask=embed_mask)
         output = self.dropout(embedded)
 
         hidden_states = []

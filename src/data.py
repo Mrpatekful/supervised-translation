@@ -12,8 +12,11 @@ import sys
 import re
 
 from os.path import exists, join, dirname, abspath
+
 from torchtext.datasets import Multi30k
-from torchtext.data import Field, HarvardBucketIterator
+from torchtext.data import (
+    Field, Iterator, batch as batchify)
+
 from nltk.translate import bleu
 
 
@@ -65,6 +68,44 @@ def ids2text(ids, field, ignored=None):
         ignored = []
     return [[field.vocab.itos[i] for
              i in s if i not in ignored] for s in ids]
+
+
+class HarvardBucketIterator(Iterator):
+    """Defines an enhanced bucket iterator.
+
+    Reference:
+    http://nlp.seas.harvard.edu/2018/04/03/attention.html.
+    """
+
+    def create_batches(self):
+        if self.train:
+            self.batches = pool(
+                data=self.data(), 
+                batch_size=self.batch_size,
+                batch_size_fn=self.batch_size_fn,
+                sort_key=self.sort_key, 
+                random_shuffler=self.random_shuffler)
+
+        else:
+            self.batches = [
+                sorted(b, key=self.sort_key)
+                for b in batchify(
+                    self.data(), self.batch_size,
+                    self.batch_size_fn)]
+
+
+def pool(data, batch_size, batch_size_fn, sort_key,
+         random_shuffler):
+    """
+    Yields batches from shuffle buffers which are
+    `batch_size * 100` sized chunks.
+    """
+    for bucket in batchify(data, batch_size * 100):
+        batches = batchify(
+            sorted(bucket, key=sort_key),
+            batch_size, batch_size_fn)
+        for batch in random_shuffler(list(batches)):
+            yield batch
 
 
 def create_datasets(args, device):
@@ -146,5 +187,7 @@ def get_special_indices(fields):
     src_pad_idx = SRC.vocab.stoi[PAD]
     trg_pad_idx = TRG.vocab.stoi[PAD]
 
-    return start_idx, end_idx, src_pad_idx, \
-        trg_pad_idx, unk_idx
+    indices = start_idx, end_idx, \
+        src_pad_idx, trg_pad_idx, unk_idx
+
+    return indices
