@@ -12,7 +12,7 @@ import re
 
 from os.path import exists, join, dirname, abspath
 
-from torchtext.datasets import Multi30k
+from torchtext.datasets import WMT14
 from torchtext.data import (
     Field, Iterator, batch as batchify)
 
@@ -137,7 +137,7 @@ def create_datasets(args, device):
         SRC = fields['src']
         TRG = fields['trg']
 
-    train, valid, test = Multi30k.splits(
+    train, valid, test = WMT14.splits(
         exts=('.en', '.de'),
         fields=(SRC, TRG),
         root=args.data_dir)

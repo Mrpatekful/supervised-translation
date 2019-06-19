@@ -59,7 +59,7 @@ def setup_train_args():
     parser.add_argument(
         '--epochs',
         type=int,
-        default=100,
+        default=1000,
         help='Maximum number of epochs for training.')
     parser.add_argument(
         '--cuda',
@@ -79,7 +79,7 @@ def setup_train_args():
     parser.add_argument(
         '--patience',
         type=int,
-        default=10,
+        default=20,
         help='Patience value for early stopping.')
     parser.add_argument(
         '--model_dir',
