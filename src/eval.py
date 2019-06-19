@@ -55,10 +55,12 @@ def main():
     args = setup_eval_args()
     device = torch.device('cuda' if args.cuda else 'cpu')
 
-    state_dict = torch.load(join(args.model_dir, 'model.pt'),
-                            map_location=device)
-    fields = torch.load(join(args.model_dir, 'fields.pt'),
-                        map_location=device)
+    state_dict = torch.load(
+        join(args.model_dir, 'model.pt'),
+        map_location=device)
+    fields = torch.load(
+        join(args.model_dir, 'fields.pt'),
+        map_location=device)
 
     SRC, TRG = fields['src'], fields['trg']
 

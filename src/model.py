@@ -1,5 +1,4 @@
 """
-
 @author:    Patrik Purgai
 @copyright: Copyright 2019, nmt
 @license:   MIT
@@ -121,7 +120,8 @@ class Seq2Seq(Module):
         """
         # inputs are expexted in sequence-first format
         batch_size = inputs.size(0)
-        max_len = targets.size(1) if targets is not None else max_len
+        max_len = targets.size(1) if targets is not None \
+            else max_len
 
         attn_mask = inputs.eq(self.pad_idx)
 
@@ -129,7 +129,7 @@ class Seq2Seq(Module):
         # which makes the model more robust to unks during testing
         # NOTE unk dropout probability is hardcoded to be 0.1
         if self.training:
-            unk_mask = inputs.new_empty(inputs.size()).bernoulli_(0.1)
+            unk_mask = torch.empty_like(inputs).bernoulli_(0.1)
             unk_mask = unk_mask.byte() & inputs.ne(self.pad_idx)
             inputs.masked_fill_(mask=unk_mask, value=self.unk_idx)
 
@@ -144,7 +144,8 @@ class Seq2Seq(Module):
         # precomputing embedding dropout mask for the decoder
         # NOTE embedding dropout is hardcoded 0.1
         embed = self.decoder.embedding
-        embed_mask = embed.weight.new_empty((embed.weight.size(0), 1))
+        embed_mask = embed.weight.new_empty(
+            (embed.weight.size(0), 1))
         embed_mask.bernoulli_(0.9).expand_as(embed.weight) / 0.9
 
         for idx in range(max_len):
@@ -299,6 +300,8 @@ class Decoder(Module):
             output = self.dropout(output)
             hidden_states.append(hidden_state)
 
+        # NOTE attention weights are not used currently
+        # (they could be exported for visualization)
         output, _ = self.attn(
             decoder_output=output,
             hidden_state=hidden_state,

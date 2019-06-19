@@ -1,5 +1,4 @@
 """
-
 @author:    Patrik Purgai
 @copyright: Copyright 2019, nmt
 @license:   MIT
@@ -24,6 +23,7 @@ from data import (
 from collections import OrderedDict
 from tqdm import tqdm
 from datetime import datetime
+from apex import amp
 
 from torch.nn.functional import kl_div
 from torch.nn.utils import clip_grad_norm_
@@ -59,7 +59,7 @@ def setup_train_args():
     parser.add_argument(
         '--epochs',
         type=int,
-        default=20,
+        default=100,
         help='Maximum number of epochs for training.')
     parser.add_argument(
         '--cuda',
@@ -67,21 +67,32 @@ def setup_train_args():
         default=torch.cuda.is_available(),
         help='Device for training.')
     parser.add_argument(
+        '--mixed',
+        type=bool,
+        default=True,
+        help='Use mixed precision training.')
+    parser.add_argument(
         '--learning_rate',
         type=float,
         default=1,
         help='Learning rate for the model.')
     parser.add_argument(
+        '--patience',
+        type=int,
+        default=10,
+        help='Patience value for early stopping.')
+    parser.add_argument(
         '--model_dir',
         type=str,
         default=join(
-            abspath(dirname(__file__)), '..', 'model.{}'.format(
+            abspath(dirname(__file__)), 
+            '..', 'model.{}'.format(
                 datetime.today().strftime('%j%H%m'))),
         help='Path of the model checkpoints.')
     parser.add_argument(
         '--batch_size',
         type=int,
-        default=64,
+        default=128,
         help='Size of the batches during training.')
 
     setup_data_args(parser)
@@ -256,6 +267,12 @@ def main():
     best_avg_acc, init_epoch = load_state(
         model, optimizer, args.model_dir, device)
 
+    # tracking patience value for early stopping
+    patience = args.patience
+
+    if args.mixed and args.cuda:
+        model, optimizer = amp.initialize(model, optimizer)
+        
     def train_step(batch):
         """
         Performs a single step of training 
@@ -281,7 +298,7 @@ def main():
             criterion=criterion,
             pad_idx=trg_pad_idx)
 
-        loss.backward()
+        backward(loss)
 
         # clipping gradients enhances sgd performance
         # and prevents exploding gradient problem
@@ -315,6 +332,18 @@ def main():
 
         return loss.item(), accuracy, preds
 
+    def backward(loss):
+        """
+        Backpropagates the loss with either amp or
+        without.
+        """
+        # cuda is required for mixed precision training.
+        if args.mixed and args.cuda:
+            with amp.scale_loss(loss, optimizer) as scaled:
+                scaled.backward()
+        else:
+            loss.backward()
+
     scheduler = LambdaLR(optimizer, compute_lr)
         
     for epoch in range(init_epoch, args.epochs):
@@ -322,12 +351,18 @@ def main():
         loop = tqdm(train)
         loop.set_description('{}'.format(epoch))
         model.train()
+        avg_acc = []
 
         for batch in loop:
             loss, accuracy = train_step(batch)
 
+            avg_acc.append(accuracy)
+
             loop.set_postfix(ordered_dict=OrderedDict(
                 loss=loss, acc=accuracy))
+
+        avg_acc = sum(avg_acc) / len(avg_acc)
+        print('avg train acc: {:.4}'.format(avg_acc))
 
         # running validation loop
         loop = tqdm(val)
@@ -349,6 +384,13 @@ def main():
             save_state(model, optimizer, avg_acc, 
                        epoch, args.model_dir)
             best_avg_acc = avg_acc
+            patience = args.patience
+
+        else:
+            patience -= 1
+            # terminating learning loop
+            if patience == 0:
+                break
         
         scheduler.step()
 

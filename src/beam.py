@@ -1,5 +1,4 @@
 """
-
 @author:    Patrik Purgai
 @copyright: Copyright 2019, nmt
 @license:   MIT

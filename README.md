@@ -7,6 +7,18 @@ mechanism *[Luong et al. (2015)](https://arxiv.org/pdf/1508.04025.pdf)* and beam
 
 ## Usage
 
+The model uses mixed precision training from nvidia/apex which can be installed with the following commands. The project also relies on the newest version of torchtext, which can be installed from the git repository (it is required for serializing the dataset).
+
+```bash
+git clone https://github.com/NVIDIA/apex
+cd apex
+pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" .
+```
+
+```bash
+pip install git+https://github.com/pytorch/text
+```
+
 The model can be trained with the following command.
 Note that `<data_dir>` and `<model_dir>` are optional,
 as they are provided by default. Training with different hyperparameters can be done by running the `train.py` script and passing the desired options as command line arguments.
