@@ -26,12 +26,12 @@ switching the `train` to the `eval` flag. During this interactive mode the model
 
 Training the model is fast and easy on Google Colaboratory, which can be done from scratch by creating a new colab file in your Google Drive and running it with the following snippet. It is important to set the runtime type to GPU with a Tesla T4 unit as it can fully leverage mixed-precision training and is much faster than the older K80 version. You can check the current type by running the following line in a cell of your colab.
 
-```IPython Notebook
+```bash
 !nvidia-smi
 ```
 
-```IPython Notebook
-!git clone https://username:password@github.com/Mrpatekful/supervised-sentence-encoding.git
+```bash
+!git clone https://github.com/Mrpatekful/supervised-translation.git
 !python -m pip install --upgrade pip
 
 # installing apex
@@ -39,12 +39,12 @@ Training the model is fast and easy on Google Colaboratory, which can be done fr
 !cd apex; pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" .
 
 # building the cython code
-!cd supervised-sentence-encoding; python setup.py build_ext --inplace
+!cd supervised-translation; python setup.py build_ext --inplace
 
 # installing the required packages
-!cd supervised-sentence-encoding; pip install -r requirements.txt
+!cd supervised-translation; pip install -r requirements.txt
 
-!./supervised-sentence-encoding/run.sh "train" "."
+!./supervised-translation/run.sh "train" "."
 ```
 
 ## Results
