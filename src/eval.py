@@ -1,7 +1,7 @@
 """
 
 @author:    Patrik Purgai
-@copyright: Copyright 2019, nmt
+@copyright: Copyright 2019, supervised-translation
 @license:   MIT
 @email:     purgai.patrik@gmail.com
 @date:      2019.04.04.
@@ -13,12 +13,12 @@
 
 import argparse
 import torch
-import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 
 from os.path import join
 
-from beam import setup_beam_args, beam_search
+from beam import (
+    beam_search,
+    setup_beam_args)
 
 from data import (
     PAD, END,
@@ -26,7 +26,9 @@ from data import (
     text2ids,
     get_special_indices)
 
-from model import create_model, setup_model_args
+from model import (
+    create_model,
+    setup_model_args)
 
 
 def setup_eval_args():
@@ -84,10 +86,12 @@ def main():
             device=device)
         output = ids2text([preds.squeeze()], TRG)[0]
 
-        return ' '.join(w for w in output if w not in (PAD, END))
+        return ' '.join(w for w in output
+                        if w not in (PAD, END))
 
-    print('Type a sentence to translate. CTRL + C to escape.')
-
+    print('Type a sentence to translate. ' + \
+          'CTRL + C to escape.')
+          
     while True:
         try:
             print()

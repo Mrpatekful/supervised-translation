@@ -1,6 +1,6 @@
 """
 @author:    Patrik Purgai
-@copyright: Copyright 2019, nmt
+@copyright: Copyright 2019, supervised-translation
 @license:   MIT
 @email:     purgai.patrik@gmail.com
 @date:      2019.04.04.
@@ -11,45 +11,52 @@
 # pylint: disable=no-member
 # pylint: disable=not-callable
 
-from beam import beam_search, setup_beam_args
-from model import create_model, setup_model_args
+import torch
+import argparse
+import os
+import random
+
+import numpy as np
+
+from beam import (
+    beam_search, 
+    setup_beam_args)
+
+from model import (
+    create_model, 
+    setup_model_args)
 
 from data import (
     create_datasets,
-    setup_data_args,
-    get_special_indices,
-    ids2text)
+    setup_data_args)
 
 from collections import OrderedDict
 from tqdm import tqdm
+from math import ceil
 from datetime import datetime
-from apex import amp
 
-from torch.nn.functional import kl_div
+try:
+    from apex import amp
+    APEX_INSTALLED = True
+except ImportError:
+    APEX_INSTALLED = False
+
+from torch.nn.functional import (
+    cross_entropy, softmax,
+    kl_div, log_softmax)
+
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import SGD
-from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import (
+    LambdaLR)
 
-from torchnlp.metrics.bleu import get_moses_multi_bleu
+from torchnlp.metrics.bleu import (
+    get_moses_multi_bleu)
 
 from os.path import (
     exists, join,
     dirname, abspath)
 
-import torch
-import argparse
-import os
-import random
-import numpy as np
-
-
-torch.manual_seed(0)
-torch.cuda.manual_seed(0)
-np.random.seed(0)
-random.seed(0)
-
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
 
 def setup_train_args():
     """
@@ -57,7 +64,7 @@ def setup_train_args():
     """
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--epochs',
+        '--max_epochs',
         type=int,
         default=1000,
         help='Maximum number of epochs for training.')
@@ -69,13 +76,18 @@ def setup_train_args():
     parser.add_argument(
         '--mixed',
         type=bool,
-        default=True,
+        default=APEX_INSTALLED,
         help='Use mixed precision training.')
     parser.add_argument(
         '--learning_rate',
         type=float,
         default=1,
         help='Learning rate for the model.')
+    parser.add_argument(
+        '--batch_size',
+        type=int,
+        default=64,
+        help='Size of the batches during training.')
     parser.add_argument(
         '--patience',
         type=int,
@@ -90,10 +102,10 @@ def setup_train_args():
                 datetime.today().strftime('%j%H%m'))),
         help='Path of the model checkpoints.')
     parser.add_argument(
-        '--batch_size',
+        '--local_rank',
         type=int,
-        default=128,
-        help='Size of the batches during training.')
+        default=-1,
+        help='Local rank for distributed training.')
 
     setup_data_args(parser)
     setup_model_args(parser)
@@ -102,7 +114,8 @@ def setup_train_args():
     return parser.parse_args()
 
 
-def save_state(model, optimizer, avg_acc, epoch, path):
+def save_state(model, optimizer, avg_acc, epoch, step,
+               path):
     """
     Saves the model and optimizer state.
     """
@@ -111,7 +124,8 @@ def save_state(model, optimizer, avg_acc, epoch, path):
         'model': model.state_dict(),
         'optimizer': optimizer.state_dict(),
         'avg_acc': avg_acc,
-        'epoch': epoch
+        'epoch': epoch,
+        'step': step
     }
     print('Saving model to {}'.format(model_path))
     # making sure the model saving is not left in a
@@ -136,10 +150,14 @@ def load_state(model, optimizer, path, device):
         model.load_state_dict(state_dict['model'])
         optimizer.load_state_dict(state_dict['optimizer'])
         print('Loading model from {}'.format(model_path))
-        return state_dict['avg_acc'], state_dict['epoch']
+        return (
+            state_dict['avg_acc'],
+            state_dict['epoch'],
+            state_dict['step']
+        )
 
     except FileNotFoundError:
-        return -np.inf, 0
+        return 0, 0, 0
 
 
 def create_optimizer(args, parameters):
@@ -220,22 +238,16 @@ def compute_loss(outputs, targets, criterion, pad_idx):
     return loss, accuracy
 
 
-def compute_bleu(outputs, targets, indices, fields):
+def compute_bleu(outputs, targets, tokenizer):
     """
     Computes the bleu score for a batch of output 
     target pairs.
     """
-    _, TRG = fields
-    _, end_idx, _, trg_pad_idx, _ = indices
-    ignored = end_idx, trg_pad_idx
+    outputs = tokenizer.decode(outputs)
+    targets = tokenizer.decode(targets)
 
-    hyps = ids2text(outputs, TRG, ignored)
-    hyps = list(map(lambda x: ' '.join(x), hyps))
-
-    refs = ids2text(targets, TRG, ignored)
-    refs = list(map(lambda x: ' '.join(x), refs))
-
-    return get_moses_multi_bleu(hyps, refs)
+    return get_moses_multi_bleu(
+        outputs, targets)
 
 
 def main():
@@ -243,99 +255,129 @@ def main():
     Performs training, validation and testing.
     """
     args = setup_train_args()
-    device = torch.device('cuda' if args.cuda else 'cpu')
+    distributed = args.local_rank != -1
+    master_process = args.local_rank in [0, -1]
 
-    # creating dataset and storing dataset splits, fields
-    # and special indices as individual variables
-    # for convenience
-    (train, val, test), (SRC, TRG) = create_datasets(
-        args=args, device=device)
+    if distributed and args.cuda:
+        # use distributed training if local rank is given
+        # and GPU training is requested
+        torch.cuda.set_device(args.local_rank)
+        device = torch.device('cuda', args.local_rank)
 
-    indices = get_special_indices((SRC, TRG))
-    _, _, _, trg_pad_idx, _ = indices
+        torch.distributed.init_process_group(
+            backend='nccl', init_method='env://')
+
+    else:
+        device = torch.device(
+            'cuda' if args.cuda else 'cpu')
+
+    # creating dataset and storing dataset splits
+    # as individual variables for convenience
+    datasets, tokenizer = create_dataset(
+        args=args, device=device,
+        distributed=distributed)
+
+    vocab_size = len(tokenizer)
 
     model = create_model(
-        args=args, fields=(SRC, TRG), device=device)
+        args=args, vocab_size=vocab_size,
+        device=device)
 
     optimizer = create_optimizer(
         args=args, parameters=model.parameters())
 
-    criterion = create_criterion(
-        pad_idx=trg_pad_idx, vocab_size=len(TRG.vocab), 
-        device=device)
-
-    best_avg_acc, init_epoch = load_state(
-        model, optimizer, args.model_dir, device)
-
-    # tracking patience value for early stopping
-    patience = args.patience
+    # loading previous state of the training
+    best_avg_acc, init_epoch, step = load_state(
+        model=model, optimizer=optimizer,
+        path=args.model_dir, device=device)
 
     if args.mixed and args.cuda:
-        model, optimizer = amp.initialize(model, optimizer)
-        
-    def train_step(batch):
-        """
-        Performs a single step of training 
-        """
-        optimizer.zero_grad()
+        model, optimizer = amp.initialize(
+            model, optimizer, opt_level='O2')
 
-        inputs, targets = batch.src, batch.trg
+    if distributed:
+        model = DistributedDataParallel(
+            model, device_ids=[args.local_rank], 
+            output_device=args.local_rank)
 
-        # the first token is the sos which is also
-        # created by the decoder internally
-        targets = targets[:, 1:]
-        targets = targets.contiguous()
-        max_len = targets.size(1)
+    # TODO get world size here instead of 1
+    train, valid, test = [
+        (split, ceil(size / args.batch_size / 1)) 
+        for split, size in datasets]
+
+    # computing the sizes of the dataset splits
+    train_dataset, num_train_steps = train
+    valid_dataset, num_valid_steps = valid
+    test_dataset, num_test_steps = test
+
+    patience = 0
+
+    def convert_to_tensor(ids):
+        """
+        Convenience function for converting int32
+        ndarray to torch int64.
+        """
+        return torch.as_tensor(ids).long().to(device)
+
+    def forward_step(batch):
+        """
+        Applies forward pass with the given batch.
+        """
+        inputs, labels = batch
+
+        labels = convert_to_tensor(labels)
+
+        # converting the batch of inputs to torch tensor
+        inputs = [convert_to_tensor(m) for m in inputs]
+
+        input_ids, token_type_ids, attn_mask, \
+            perm_mask, target_map = inputs
 
         outputs = model(
-            inputs=inputs,
-            targets=targets,
-            max_len=max_len)
+            input_ids=input_ids,
+            token_type_ids=token_type_ids,
+            attention_mask=attn_mask,
+            perm_mask=perm_mask,
+            target_mapping=target_map.float())
 
         loss, accuracy = compute_loss(
             outputs=outputs,
-            targets=targets,
-            criterion=criterion,
-            pad_idx=trg_pad_idx)
+            labels=labels)
+
+        return loss, accuracy
+
+    def train_step(batch):
+        """
+        Performs a single step of training.
+        """
+        nonlocal step
+
+        loss, accuracy = forward_step(batch)
+
+        if torch.isnan(loss).item():
+            print('skipping step (nan)')
+            # returning None values when a NaN loss
+            # is encountered and skipping backprop
+            # so model grads will not be corrupted
+            return None, None
+
+        loss /= args.grad_accum_steps
 
         backward(loss)
+        clip_grad_norm(1.0)
 
-        # clipping gradients enhances sgd performance
-        # and prevents exploding gradient problem
-        clip_grad_norm_(model.parameters(), 0.5)
+        step += 1
 
-        optimizer.step()
+        if step % args.grad_accum_steps == 0:
+            optimizer.step()
+            optimizer.zero_grad()
 
         return loss.item(), accuracy
 
-    def eval_step(batch):
-        """
-        Performs a single step of evaluation.
-        """
-        inputs, targets = batch.src, batch.trg
-
-        targets = targets[:, 1:]
-        targets = targets.contiguous()
-        max_len = targets.size(1)
-
-        outputs = model(
-            inputs=inputs,
-            max_len=max_len)
-
-        loss, accuracy = compute_loss(
-            outputs=outputs,
-            targets=targets,
-            criterion=criterion,
-            pad_idx=trg_pad_idx)
-
-        _, preds = outputs
-
-        return loss.item(), accuracy, preds
-
     def backward(loss):
         """
-        Backpropagates the loss with either amp or
-        without.
+        Backpropagates the loss in either mixed or
+        normal precision mode.
         """
         # cuda is required for mixed precision training.
         if args.mixed and args.cuda:
@@ -344,64 +386,100 @@ def main():
         else:
             loss.backward()
 
+    def clip_grad_norm(max_norm):
+        """
+        Applies gradient clipping.
+        """
+        if args.mixed and args.cuda:
+            clip_grad_norm_(
+                amp.master_params(optimizer), max_norm)
+        else:
+            clip_grad_norm_(model.parameters(), max_norm)
+
     scheduler = LambdaLR(optimizer, compute_lr)
         
     for epoch in range(init_epoch, args.epochs):
         # running training loop
-        loop = tqdm(train)
+        loop = tqdm(
+            train_dataset(), 
+            total=num_train_steps,
+            disable=not master_process)
+
         loop.set_description('{}'.format(epoch))
         model.train()
         avg_acc = []
 
         for batch in loop:
-            loss, accuracy = train_step(batch)
-
-            avg_acc.append(accuracy)
-
-            loop.set_postfix(ordered_dict=OrderedDict(
-                loss=loss, acc=accuracy))
-
-        avg_acc = sum(avg_acc) / len(avg_acc)
-        print('avg train acc: {:.4}'.format(avg_acc))
-
-        # running validation loop
-        loop = tqdm(val)
-        model.eval()
-        avg_acc = []
-
-        with torch.no_grad():
-            for batch in loop:
-                loss, accuracy, _ = eval_step(batch)
+            try:
+                loss, accuracy = train_step(batch)
 
                 avg_acc.append(accuracy)
 
                 loop.set_postfix(ordered_dict=OrderedDict(
                     loss=loss, acc=accuracy))
 
-        avg_acc = sum(avg_acc) / len(avg_acc)
-        print('avg val acc: {:.4}'.format(avg_acc))
+                scheduler.step(epoch=step)
+
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    print('skipping step (oom)')
+
+        if len(avg_acc) > 0:
+            avg_acc = sum(avg_acc) / len(avg_acc)
+        else:
+            avg_acc = 0.0
+
+        if master_process:
+            print('avg train acc: {:.4}'.format(avg_acc))
+
+        loop = tqdm(
+            valid_dataset(), 
+            total=num_valid_steps,
+            disable=not master_process)
+
+        model.eval()
+        avg_acc = []
+
+        # running validation loop
+        with torch.no_grad():
+            for batch in loop:
+                loss, accuracy = forward_step(batch)
+
+                avg_acc.append(accuracy)
+
+                loop.set_postfix(ordered_dict=OrderedDict(
+                    loss=loss.item(), acc=accuracy))
+
+            avg_acc = sum(avg_acc) / len(avg_acc)
+
+        if master_process:
+            print('avg valid acc: {:.4}'.format(avg_acc))
+
         if avg_acc > best_avg_acc:
-            save_state(model, optimizer, avg_acc, 
-                       epoch, args.model_dir)
+            patience = 0
             best_avg_acc = avg_acc
-            patience = args.patience
+            save_state(
+                model=model, optimizer=optimizer,
+                avg_acc=best_avg_acc, epoch=epoch + 1,
+                step=step, path=args.model_dir)
 
         else:
-            patience -= 1
-            # terminating learning loop
-            if patience == 0:
+            patience += 1
+            if patience == args.patience:
                 break
-        
-        scheduler.step()
 
-    # running testing loop
-    loop = tqdm(test)
+    loop = tqdm(
+        test_dataset(), 
+        total=num_test_steps,
+        disable=not master_process)
+
     model.eval()
     hypotheses, references = [], []
 
+    # running testing loop
     with torch.no_grad():
         for batch in loop:
-            loss, accuracy, outputs = eval_step(batch)
+            loss, accuracy, outputs = forward_step(batch)
 
             hypotheses.extend(outputs)
             references.extend(batch.trg)
@@ -410,7 +488,7 @@ def main():
                 loss=loss, acc=accuracy))
 
     bleu_score = compute_bleu(
-        hypotheses, references, indices, (SRC, TRG))
+        hypotheses, references, tokenizer)
 
     print('test bleu score: {:.4}'.format(bleu_score))
 

@@ -1,6 +1,6 @@
 """
 @author:    Patrik Purgai
-@copyright: Copyright 2019, nmt
+@copyright: Copyright 2019, supervised-translation
 @license:   MIT
 @email:     purgai.patrik@gmail.com
 @date:      2019.04.04.
@@ -24,8 +24,6 @@ from torch.nn.functional import (
 from torch.nn import (
     Linear, Softmax, Parameter, 
     GRU, Dropout, Embedding)
-
-from torchnlp.nn import LockedDropout
 
 from data import get_special_indices
 
@@ -126,12 +124,12 @@ class Seq2Seq(Module):
         attn_mask = inputs.eq(self.pad_idx)
 
         # randomly masking input with unk during training
-        # which makes the model more robust to unks during testing
+        # which makes the model more robust to unks at testing
         # NOTE unk dropout probability is hardcoded to be 0.1
         if self.training:
             unk_mask = torch.empty_like(inputs).bernoulli_(0.1)
             unk_mask = unk_mask.byte() & inputs.ne(self.pad_idx)
-            inputs.masked_fill_(mask=unk_mask, value=self.unk_idx)
+            inputs.masked_fill_(unk_mask, value=self.unk_idx)
 
         # the number of layers in the decoder must be equal
         # to the number of layers in the encoder because of
@@ -141,12 +139,13 @@ class Seq2Seq(Module):
         scores = []
         preds = self.start_idx.detach().expand(batch_size, 1)
 
-        # precomputing embedding dropout mask for the decoder
+        # precomputing embedding dropout mask
         # NOTE embedding dropout is hardcoded 0.1
         embed = self.decoder.embedding
         embed_mask = embed.weight.new_empty(
             (embed.weight.size(0), 1))
-        embed_mask.bernoulli_(0.9).expand_as(embed.weight) / 0.9
+        embed_mask.bernoulli_(0.9).expand_as(
+            embed.weight) / 0.9
 
         for idx in range(max_len):
             # if targets are provided and training then apply
@@ -198,6 +197,8 @@ class Encoder(Module):
 
         # creating rnn layer as module list so locked
         # dropout can be applied between each layer
+        # NOTE: currently not using weight drop, because
+        # it is incompatible with apex
         self.rnn = ModuleList([
             GRU(input_size=input_size,
                 hidden_size=hidden_size,

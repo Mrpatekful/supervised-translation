@@ -1,7 +1,7 @@
 #!/bin/bash
 
 RUN_MODE=${1:-"train"}
-DATA_DIR=~/data/nlp/nmt
+DATA_DIR=${2:-~/data/nlp/nmt}
 MODEL_DIR=$(dirname "$0")/model
 
 mkdir -p $MODEL_DIR

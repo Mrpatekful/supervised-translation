@@ -7,31 +7,44 @@ mechanism *[Luong et al. (2015)](https://arxiv.org/pdf/1508.04025.pdf)* and beam
 
 ## Usage
 
-The model uses mixed precision training from nvidia/apex which can be installed with the following commands. The project also relies on the newest version of torchtext, which can be installed from the git repository (it is required for serializing the dataset).
-
-```bash
-git clone https://github.com/NVIDIA/apex
-cd apex
-pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" .
-```
-
-```bash
-pip install git+https://github.com/pytorch/text
-```
+The model uses mixed precision training from nvidia/apex. Note that apex is not required and is only used if it is available. For installation guide of this module see the official [instructions](https://github.com/NVIDIA/apex).
 
 The model can be trained with the following command.
 Note that `<data_dir>` and `<model_dir>` are optional,
 as they are provided by default. Training with different hyperparameters can be done by running the `train.py` script and passing the desired options as command line arguments.
 
-```bash
+```console
 ./run.sh "train" "<data_dir>" "<model_dir>"
 ```
 
 An interactive evaluation mode is available on the trained model by
 switching the `train` to the `eval` flag. During this interactive mode the model uses beam search decoding. Beam width parameter can be modified in the `beam.py` file.
 
-```bash
+```console
 ./run.sh "eval" "<data_dir>" "<model_dir>"
+```
+
+Training the model is fast and easy on Google Colaboratory, which can be done from scratch by creating a new colab file in your Google Drive and running it with the following snippet. It is important to set the runtime type to GPU with a Tesla T4 unit as it can fully leverage mixed-precision training and is much faster than the older K80 version. You can check the current type by running the following line in a cell of your colab.
+
+```IPython Notebook
+!nvidia-smi
+```
+
+```IPython Notebook
+!git clone https://username:password@github.com/Mrpatekful/supervised-sentence-encoding.git
+!python -m pip install --upgrade pip
+
+# installing apex
+!git clone https://github.com/NVIDIA/apex
+!cd apex; pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" .
+
+# building the cython code
+!cd supervised-sentence-encoding; python setup.py build_ext --inplace
+
+# installing the required packages
+!cd supervised-sentence-encoding; pip install -r requirements.txt
+
+!./supervised-sentence-encoding/run.sh "train" "."
 ```
 
 ## Results
