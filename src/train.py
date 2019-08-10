@@ -90,7 +90,7 @@ def setup_train_args():
     parser.add_argument(
         '--batch_size',
         type=int,
-        default=2,
+        default=64,
         help='Size of the batches during training.')
     parser.add_argument(
         '--patience',
