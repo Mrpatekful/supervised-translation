@@ -71,6 +71,11 @@ def setup_data_args(parser):
         type=int,
         default=50,
         help='Maximum length of a sequence.')
+    parser.add_argument(
+        '--lower',
+        type=bool,
+        default=True,
+        help='Sentences are lowered.')
 
 
 def download(args):
@@ -132,7 +137,8 @@ def create_tokenizer(args, prefix, data_path):
             '--bos_id=2',
             '--bos_piece={sos}',
             '--eos_id=3',
-            '--eos_piece={eos}'
+            '--eos_piece={eos}',
+            '--num_threads=4'
         ]).format(
             data_path=data_path,
             vocab_size=args.vocab_size,
@@ -143,7 +149,7 @@ def create_tokenizer(args, prefix, data_path):
         spm.SentencePieceTrainer.train(params)
 
     tokenizer = spm.SentencePieceProcessor()
-    tokenizer.load(tokenizer_path)
+    tokenizer.load(tokenizer_path + '.model')
 
     return tokenizer
 
@@ -196,7 +202,7 @@ def save_examples(args, data_path, tokenizer):
     """
     name = basename(splitext(data_path)[0])
 
-    examples = read_file(data_path)
+    examples = read_file(args, data_path)
 
     groups = group_elements(
         iterable=examples,
@@ -261,8 +267,8 @@ def generate_splits(args, splits):
     data_size = compute_lines(src_file)
 
     data_files = zip(
-        read_file(src_file),
-        read_file(trg_file))
+        read_file(args, src_file),
+        read_file(args, trg_file))
 
     for filename, split_size in splits:
         num_lines = int(data_size * split_size)
@@ -280,7 +286,7 @@ def generate_splits(args, splits):
         yield dump_path, num_lines
 
 
-def read_file(data_path):
+def read_file(args, data_path):
     """
     Reads the contents of a raw europarl files.
     """
@@ -288,6 +294,9 @@ def read_file(data_path):
         for line in fh:
             line = line.strip()
             if line != '':
+                if args.lower:
+                    line = line.lower()
+
                 yield line
 
 
