@@ -14,6 +14,7 @@
 import torch
 import argparse
 import os
+import logging
 import random
 
 import numpy as np
@@ -89,7 +90,7 @@ def setup_train_args():
     parser.add_argument(
         '--batch_size',
         type=int,
-        default=64,
+        default=2,
         help='Size of the batches during training.')
     parser.add_argument(
         '--patience',
@@ -105,6 +106,11 @@ def setup_train_args():
                 datetime.today().strftime('%j%H%m'))),
         help='Path of the model checkpoints.')
     parser.add_argument(
+        '--grad_accum_steps',
+        type=int,
+        default=4,
+        help='Number of steps for grad accum.')
+    parser.add_argument(
         '--local_rank',
         type=int,
         default=-1,
@@ -118,7 +124,7 @@ def setup_train_args():
 
 
 def save_state(model, optimizer, avg_acc, epoch, step,
-               path):
+               logger, path):
     """
     Saves the model and optimizer state.
     """
@@ -130,7 +136,7 @@ def save_state(model, optimizer, avg_acc, epoch, step,
         'epoch': epoch,
         'step': step
     }
-    print('Saving model to {}'.format(model_path))
+    logger.info('Saving model to {}'.format(model_path))
     # making sure the model saving is not left in a
     # corrupted state after a keyboard interrupt
     while True:
@@ -141,7 +147,7 @@ def save_state(model, optimizer, avg_acc, epoch, step,
             pass
 
 
-def load_state(model, optimizer, path, device):
+def load_state(model, optimizer, path, logger, device):
     """
     Loads the model and optimizer state.
     """
@@ -152,7 +158,7 @@ def load_state(model, optimizer, path, device):
 
         model.load_state_dict(state_dict['model'])
         optimizer.load_state_dict(state_dict['optimizer'])
-        print('Loading model from {}'.format(model_path))
+        logger.info('Loading model from {}'.format(model_path))
         return (
             state_dict['avg_acc'],
             state_dict['epoch'],
@@ -161,6 +167,36 @@ def load_state(model, optimizer, path, device):
 
     except FileNotFoundError:
         return 0, 0, 0
+
+
+def create_logger(args):
+    """
+    Creates a logger that outputs information to a
+    file and the standard output as well.
+    """
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)
+
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s')
+
+    # setting up logging to the console
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # setting up logging to a file
+    filename = '{date}.log'.format(
+        date=datetime.today().strftime(
+            '%m-%d-%H-%M'))
+
+    log_path = join(args.model_dir, filename)
+    file_handler = logging.FileHandler(
+        filename=log_path)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    return logger
 
 
 def create_optimizer(args, parameters):
@@ -246,8 +282,8 @@ def compute_bleu(outputs, targets, tokenizer):
     Computes the bleu score for a batch of output 
     target pairs.
     """
-    outputs = tokenizer.decode(outputs)
-    targets = tokenizer.decode(targets)
+    outputs = tokenizer.decode_ids(outputs)
+    targets = tokenizer.decode_ids(targets)
 
     return get_moses_multi_bleu(
         outputs, targets)
@@ -260,6 +296,8 @@ def main():
     args = setup_train_args()
     distributed = args.local_rank != -1
     master_process = args.local_rank in [0, -1]
+
+    logger = create_logger(args)
 
     if distributed and args.cuda:
         # use distributed training if local rank is given
@@ -280,20 +318,17 @@ def main():
         args=args, device=device,
         distributed=distributed)
 
-    source_tokenizer, target_tokenizer = tokenizers
-    source_vocab_size = len(source_tokenizer)
+    _, target_tokenizer = tokenizers
     target_vocab_size = len(target_tokenizer)
 
     model = create_model(
-        args=args, 
-        source_vocab_size=source_vocab_size,
-        target_vocab_size=target_vocab_size,
+        args=args, tokenizers=tokenizers, 
         device=device)
 
     optimizer = create_optimizer(
         args=args, parameters=model.parameters())
 
-    pad_idx = target_tokenizer.pad_id
+    pad_idx = target_tokenizer.pad_id()
     criterion = create_criterion(
         pad_idx=pad_idx, vocab_size=target_vocab_size,
         device=device)
@@ -301,7 +336,8 @@ def main():
     # loading previous state of the training
     best_avg_acc, init_epoch, step = load_state(
         model=model, optimizer=optimizer,
-        path=args.model_dir, device=device)
+        path=args.model_dir, logger=logger,
+        device=device)
 
     if args.mixed and args.cuda:
         model, optimizer = amp.initialize(
@@ -335,22 +371,15 @@ def main():
         """
         Applies forward pass with the given batch.
         """
-        inputs, targets = batch
+        inputs, attn_mask, targets = batch
 
+        inputs = convert_to_tensor(inputs)
+        attn_mask = convert_to_tensor(attn_mask)
         targets = convert_to_tensor(targets)
 
-        # converting the batch of inputs to torch tensor
-        inputs = [convert_to_tensor(m) for m in inputs]
-
-        input_ids, token_type_ids, attn_mask, \
-            perm_mask, target_map = inputs
-
         outputs = model(
-            input_ids=input_ids,
-            token_type_ids=token_type_ids,
-            attention_mask=attn_mask,
-            perm_mask=perm_mask,
-            target_mapping=target_map.float())
+            inputs=inputs,
+            attn_mask=attn_mask.byte())
 
         loss, accuracy = compute_loss(
             outputs=outputs,
@@ -369,7 +398,8 @@ def main():
         loss, accuracy = forward_step(batch)
 
         if torch.isnan(loss).item():
-            print('skipping step (nan)')
+            if master_process:
+                logger.warn('skipping step (nan)')
             # returning None values when a NaN loss
             # is encountered and skipping backprop
             # so model grads will not be corrupted
@@ -410,9 +440,14 @@ def main():
         else:
             clip_grad_norm_(model.parameters(), max_norm)
 
-    scheduler = LambdaLR(optimizer, compute_lr)
+    scheduler = LambdaLR(
+        optimizer=optimizer, 
+        lr_lambda=compute_lr)
+
+    if master_process:
+        logger.info(str(vars(args)))
         
-    for epoch in range(init_epoch, args.epochs):
+    for epoch in range(init_epoch, args.max_epochs):
         # running training loop
         loop = tqdm(
             train_dataset(), 
@@ -427,16 +462,17 @@ def main():
             try:
                 loss, accuracy = train_step(batch)
 
-                avg_acc.append(accuracy)
+                if accuracy is not None:
+                    avg_acc.append(accuracy)
 
                 loop.set_postfix(ordered_dict=OrderedDict(
                     loss=loss, acc=accuracy))
 
-                scheduler.step(epoch=step)
-
             except RuntimeError as e:
                 if 'out of memory' in str(e):
-                    print('skipping step (oom)')
+                    logger.warn('skipping step (oom)')
+        
+        scheduler.step(epoch=epoch)
 
         if len(avg_acc) > 0:
             avg_acc = sum(avg_acc) / len(avg_acc)
@@ -444,7 +480,7 @@ def main():
             avg_acc = 0.0
 
         if master_process:
-            print('avg train acc: {:.4}'.format(avg_acc))
+            logger.info('avg train acc: {:.4}'.format(avg_acc))
 
         loop = tqdm(
             valid_dataset(), 
@@ -467,15 +503,17 @@ def main():
             avg_acc = sum(avg_acc) / len(avg_acc)
 
         if master_process:
-            print('avg valid acc: {:.4}'.format(avg_acc))
+            logger.warn('avg valid acc: {:.4}'.format(avg_acc))
 
         if avg_acc > best_avg_acc:
             patience = 0
             best_avg_acc = avg_acc
-            save_state(
-                model=model, optimizer=optimizer,
-                avg_acc=best_avg_acc, epoch=epoch + 1,
-                step=step, path=args.model_dir)
+            if master_process:
+                save_state(
+                    model=model, optimizer=optimizer,
+                    avg_acc=best_avg_acc, epoch=epoch + 1,
+                    step=step, logger=logger,
+                    path=args.model_dir)
 
         else:
             patience += 1
@@ -504,7 +542,7 @@ def main():
     bleu_score = compute_bleu(
         hypotheses, references, target_tokenizer)
 
-    print('test bleu score: {:.4}'.format(bleu_score))
+    logger.info('test bleu score: {:.4}'.format(bleu_score))
 
 
 if __name__ == '__main__':

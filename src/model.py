@@ -42,17 +42,22 @@ def setup_model_args(parser):
         help='Embedding dimension for the tokens.')
 
 
-def create_model(args, fields, device):
+def create_model(args, tokenizers, device):
     """
     Creates the sequence to sequence model.
     """
-    SRC, TRG = fields
+    source_tokenizer, target_tokenizer = tokenizers
+
+    special_ids = target_tokenizer.bos_id(), \
+        target_tokenizer.eos_id(), source_tokenizer.pad_id(), \
+        target_tokenizer.pad_id(), source_tokenizer.unk_id()
+
     tensor_indices = [
-        torch.tensor(i).to(device) for i in indices]
+        torch.tensor(i).to(device) for i in special_ids]
 
     model = Seq2Seq(
-        source_vocab_size=len(SRC.vocab),
-        target_vocab_size=len(TRG.vocab),
+        source_vocab_size=len(source_tokenizer),
+        target_vocab_size=len(target_tokenizer),
         indices=tensor_indices,
         **vars(args)).to(device)
 
@@ -108,7 +113,8 @@ class Seq2Seq(Module):
             vocab_size=target_vocab_size,
             num_softmax=15)
 
-    def forward(self, inputs, targets=None, max_len=50):
+    def forward(self, inputs, attn_mask=None, targets=None, 
+                max_len=50):
         """
         Runs the inputs through the encoder-decoder model.
         """
@@ -117,7 +123,8 @@ class Seq2Seq(Module):
         max_len = targets.size(1) if targets is not None \
             else max_len
 
-        attn_mask = inputs.eq(self.pad_idx)
+        if attn_mask is None:
+            attn_mask = inputs.eq(self.pad_idx)
 
         # randomly masking input with unk during training
         # which makes the model more robust to unks at testing
