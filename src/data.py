@@ -127,6 +127,15 @@ def download(args):
             args.data_dir))
         shutil.unpack_archive(
             download_path, args.data_dir)
+        
+        if args.lower:
+            source = list(read_file(args, source_file))
+            with open(source_file, 'w') as fh:
+                fh.write('\n'.join(source))
+
+            target = list(read_file(args, target_file))
+            with open(target_file, 'w') as fh:
+                fh.write('\n'.join(target))
 
     return source_file, target_file
 
