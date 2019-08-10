@@ -1,9 +1,8 @@
 # Neural machine translation
 
-Supervised neural machine translation on english-german WMT14
-dataset with seq2seq architecture from *[Sutskever et al. (2014)](https://arxiv.org/pdf/1409.3215.pdf)*, luong-style general attention
+Supervised neural machine translation on english-german Europarl dataset *[Koehn (2005)](http://homepages.inf.ed.ac.uk/pkoehn/publications/europarl-mtsummit05.pdf)* with seq2seq architecture from *[Sutskever et al. (2014)](https://arxiv.org/pdf/1409.3215.pdf)*, luong-style general attention
 mechanism *[Luong et al. (2015)](https://arxiv.org/pdf/1508.04025.pdf)* and beam search in pytorch. I employ *label smoothing [Szegedy et al. (2015)](https://arxiv.org/pdf/1512.00567.pdf)*, *weight dropout* *[Wan et al. (2013)](https://cs.nyu.edu/~wanli/dropc/dropc.pdf)*, *locked dropout [Merity et al. (2017)](https://arxiv.org/pdf/1708.02182.pdf)*, *embedding dropout [Gal & Ghahramani (2016)](https://arxiv.org/pdf/1512.05287.pdf)*, *shared embedding [Press & Wolf (2017)](https://arxiv.org/pdf/1608.05859.pdf)* and
-*mixture of softmaxes [Yang et al. (2018)](https://arxiv.org/pdf/1711.03953.pdf)* with several other smaller tweaks for better results.
+*mixture of softmaxes [Yang et al. (2018)](https://arxiv.org/pdf/1711.03953.pdf)* with several other smaller tweaks for better results. During training I use on-the-fly tokeniztion for subword-reguralization from *[Kudo (2018)](https://arxiv.org/pdf/1804.10959.pdf)*.
 
 ## Usage
 
@@ -44,7 +43,7 @@ Training the model is fast and easy on Google Colaboratory, which can be done fr
 # installing the required packages
 !cd supervised-translation; pip install -r requirements.txt
 
-!./supervised-translation/run.sh "train" "."
+!./supervised-translation/run.sh
 ```
 
 ## Results

@@ -6,12 +6,18 @@
 @date:      2019.04.04.
 """
 
+# pylint: disable=import-error
+
 import torch
 import requests
 import shutil
 import os
 import random
 import json
+
+import sentencepiece as spm
+
+from collate import padded_collate
 
 from tqdm import tqdm
 from itertools import (
@@ -30,8 +36,8 @@ from torch.utils.data.distributed import (
     DistributedSampler)
 
 
-START = '<sos>'
-END = '<eos>'
+SOS = '<sos>'
+EOS = '<eos>'
 PAD = '<pad>'
 UNK = '<unk>'
 
@@ -53,13 +59,13 @@ def setup_data_args(parser):
     parser.add_argument(
         '--vocab_size',
         type=int,
-        default=20000,
+        default=32000,
         help='Maximum size of the vocabulary.')
     parser.add_argument(
-        '--min_freq',
+        '--file_size',
         type=int,
-        default=1,
-        help='Minimum frequency of a word in the vocab.')
+        default=100000,
+        help='Max number of examples in a single file.')
     parser.add_argument(
         '--max_len',
         type=int,
@@ -72,9 +78,8 @@ def download(args):
     Downloads and extracts the daily dialog dataset from 
     google drive.
     """
-    base_url = 'https://drive.google.com/uc?export=download&' + \
-               'id=0B_bZck-ksdkpM25jRUN2X2UxMm8'
-    filename = 'wmt16_en_de.tar.gz'
+    base_url = 'http://www.statmt.org/europarl/v7/'
+    filename = 'de-en.tgz'
 
     if not exists(args.download_dir):
         os.mkdir(args.download_dir)
@@ -92,21 +97,55 @@ def download(args):
             response = session.get(
                 url, stream=True, timeout=5)
 
+            loop = tqdm(response.iter_content(2 ** 15))
+
             with open(download_path, 'wb') as f:
-                for chunk in tqdm(response.iter_content(
-                        2 ** 15)):
+                for chunk in loop:
                     if chunk:
                         f.write(chunk)
 
-    train_path = join(args.data_dir, 'train.json')
-    valid_path = join(args.data_dir, 'valid.json')
-    test_path = join(args.data_dir, 'test.json')
+    source_file = join(args.data_dir, 'europarl-v7.de-en.en')
+    target_file = join(args.data_dir, 'europarl-v7.de-en.de')
 
-    if not exists(train_path) or not \
-            exists(valid_path) or not exists(test_path):
-        print('Extracting dataset to {}'.format(
-            args.data_dir))
+    if not exists(source_file) or not exists(target_file):
+        print('Extracting dataset to {}'.format(args.data_dir))
         shutil.unpack_archive(download_path, args.data_dir)
+
+    return source_file, target_file
+
+
+def create_tokenizer(args, prefix, data_path):
+    """
+    Creates tokenizers from raw datafiles.
+    """
+    tokenizer_path = join(args.data_dir, prefix)
+
+    if not exists(tokenizer_path):
+        params = ' '.join([
+            '--input={data_path}',
+            '--vocab_size={vocab_size}',
+            '--model_prefix={prefix}',
+            '--pad_id=0',
+            '--pad_piece={pad}',
+            '--unk_id=1',
+            '--unk_piece={unk}',
+            '--bos_id=2',
+            '--bos_piece={sos}',
+            '--eos_id=3',
+            '--eos_piece={eos}'
+        ]).format(
+            data_path=data_path,
+            vocab_size=args.vocab_size,
+            prefix=tokenizer_path,
+            pad=PAD, unk=UNK, 
+            sos=SOS, eos=EOS)
+    
+        spm.SentencePieceTrainer.train(params)
+
+    tokenizer = spm.SentencePieceProcessor()
+    tokenizer.load(tokenizer_path)
+
+    return tokenizer
 
 
 def transform(args, tokenizer):
@@ -163,7 +202,6 @@ def save_examples(args, data_path, tokenizer):
         iterable=examples,
         group_size=args.file_size)
 
-    num_examples = 0
     filenames = []
     for idx, group in enumerate(groups):
         filename = join(
@@ -175,7 +213,7 @@ def save_examples(args, data_path, tokenizer):
         examples = list(generate_examples(group))
         torch.save({'dataset': examples}, filename)
 
-    return filenames, num_examples
+    return filenames
 
 
 def save_lines(dump_path, line_generator):
@@ -184,7 +222,7 @@ def save_lines(dump_path, line_generator):
     """
     with open(dump_path, 'w') as f:
         for line in line_generator:
-            f.write(line + '\n')
+            f.write('\t'.join(line) + '\n')
 
 
 def generate_lines(file_handle, num_lines):
@@ -192,12 +230,12 @@ def generate_lines(file_handle, num_lines):
     Generates `data_length` number of lines from a file.
     """
     for _, line in zip(range(num_lines), file_handle):
-        yield line.strip()
+        yield line
 
 
 def generate_examples(lines):
     """
-    Generates id examples from dialogues.
+    Generates examples from groups.
     """
     for example in lines:
         if example is None:
@@ -205,65 +243,55 @@ def generate_examples(lines):
             # file so we can break from the loop
             break
 
-        source, target = example
+        try:        
+            source, target =  example.split('\t')
+            yield source, target
 
-        yield source, target
+        except ValueError:
+            pass
 
 
 def generate_splits(args, splits):
     """
     Creates from the downloaded WMT datafile.
     """
-    data_path = join(args.data_dir, 'wmt16_en_de')
+    src_file = join(args.data_dir, 'europarl-v7.de-en.en')
+    trg_file = join(args.data_dir, 'europarl-v7.de-en.de')
 
-    data_size = compute_lines(data_path)
+    data_size = compute_lines(src_file)
 
-    with open(data_path, 'r') as fh:
-        for filename, split_size in splits:
-            num_lines = int(data_size * split_size)
-            dump_path = join(args.data_dir, filename)
+    data_files = zip(
+        read_file(src_file),
+        read_file(trg_file))
 
-            line_generator = generate_lines(
-                file_handle=fh,
-                num_lines=num_lines)
+    for filename, split_size in splits:
+        num_lines = int(data_size * split_size)
+        dump_path = join(args.data_dir, filename)
 
-            save_lines(
-                dump_path=dump_path,
-                line_generator=line_generator)
+        line_generator = tqdm(
+            generate_lines(
+                file_handle=data_files,
+                num_lines=num_lines))
 
-            yield dump_path, num_lines
+        save_lines(
+            dump_path=dump_path,
+            line_generator=line_generator)
+
+        yield dump_path, num_lines
 
 
 def read_file(data_path):
     """
-    Reads the contents of a raw dailydialog file.
+    Reads the contents of a raw europarl files.
     """
     with open(data_path, 'r') as fh:
         for line in fh:
-            # the source - target pairs are separated
-            # by \t in the raw WMT files
-            yield line.strip().split('\t')
+            line = line.strip()
+            if line != '':
+                yield line
 
 
-class Tokenizer:
-
-    def __init__(self):
-        pass
-
-    def encode(self, text):
-        pass
-
-    def decode(self, ids):
-        pass
-
-    def convert_tokens_to_ids(self, tokens):
-        pass
-
-    def convert_ids_to_tokens(self, ids):
-        pass
-
-
-def create_loader(args, filenames, tokenizer,
+def create_loader(args, filenames, tokenizers,
                   distributed, shuffle=False):
     """
     Creates a generator that iterates through the
@@ -282,7 +310,8 @@ def create_loader(args, filenames, tokenizer,
         Generator that loads examples from files
         lazily.
         """
-        file_dataset = FileDataset(filenames)
+        file_dataset = FileDataset(
+            filenames, tokenizers=tokenizers)
         file_loader = DataLoader(
             file_dataset,
             collate_fn=lambda x: x[0])
@@ -312,16 +341,27 @@ class FileDataset(Dataset):
     lazily.
     """
 
-    def __init__(self, filenames):
+    def __init__(self, filenames, tokenizers):
         self.filenames = filenames
+        self.tokenizers = tokenizers
 
     def __getitem__(self, idx):
         filename = self.filenames[idx]
         dataset = torch.load(filename)
 
-        examples = dataset['examples']
+        raw_examples = dataset['examples']
+        tokenized_examples = []
 
-        return examples
+        source_tokenizer, target_tokenizer = \
+            self.tokenizers
+        
+        for source, target in raw_examples:
+            tokenized_examples.append((
+                source_tokenizer.encode(source),
+                target_tokenizer.encode(target)
+            ))
+
+        return tokenized_examples
 
     def __len__(self):
         return len(self.filenames)
@@ -380,7 +420,9 @@ def create_sampler_cls(sampler_cls):
 
             self.sorted = sorted(
                 list(super().__iter__()),
-                key=lambda i: data_source[i][2])
+                key=lambda i: (
+                    len(data_source[i][0]),
+                    len(data_source[i][1])))
 
         def __iter__(self):
             # divides the data into bucket size segments
@@ -390,7 +432,7 @@ def create_sampler_cls(sampler_cls):
                 for idx in range(0, len(self.sorted),
                                  self.bucket_size)]
 
-            # selecting seqgemnts in random order
+            # selecting segements in random order
             random.shuffle(segments)
             for segment in segments:
 
@@ -411,17 +453,25 @@ def create_dataset(args, device, distributed):
     metadata_path = join(
         args.data_dir, 'metadata.json')
 
-    if args.force_new:
-        shutil.rmtree(metadata_path)
+    source_file, target_file = download(args)
 
     if not exists(metadata_path):
         # if dataset does not exist then create it
         # downloading and tokenizing the raw files
-        download(args)
 
-        tokenizer = Tokenizer()
+        soruce_tokenizer = create_tokenizer(
+            args=args, prefix='source', 
+            data_path=source_file)
 
-        transformed = transform(args, tokenizer)
+        target_tokenizer = create_tokenizer(
+            args=args, prefix='target', 
+            data_path=target_file)
+
+        tokenizers = soruce_tokenizer, target_tokenizer
+
+        transformed = transform(
+            args, tokenizers)
+
         train, valid, test = transformed
 
         train_files, train_size = train
@@ -452,12 +502,20 @@ def create_dataset(args, device, distributed):
         valid_files, valid_size = filenames['valid']
         test_files, test_size = filenames['test']
 
-        tokenizer = Tokenizer()
+        soruce_tokenizer = create_tokenizer(
+            args=args, prefix='source', 
+            data_path=source_file)
+
+        target_tokenizer = create_tokenizer(
+            args=args, prefix='target', 
+            data_path=target_file)
+
+        tokenizers = soruce_tokenizer, target_tokenizer
 
     train_dataset = create_loader(
         args=args,
         filenames=train_files,
-        tokenizer=tokenizer,
+        tokenizers=tokenizers,
         distributed=distributed,
         shuffle=True)
 
@@ -465,16 +523,16 @@ def create_dataset(args, device, distributed):
         args=args,
         filenames=valid_files,
         distributed=distributed,
-        tokenizer=tokenizer)
+        tokenizers=tokenizers)
 
     test_dataset = create_loader(
         args=args,
         filenames=test_files,
         distributed=distributed,
-        tokenizer=tokenizer)
+        tokenizers=tokenizers)
 
     train = train_dataset, train_size
     valid = valid_dataset, valid_size
     test = test_dataset, test_size
 
-    return (train, valid, test), tokenizer
+    return (train, valid, test), tokenizers

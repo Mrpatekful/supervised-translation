@@ -25,8 +25,6 @@ from torch.nn import (
     Linear, Softmax, Parameter, 
     GRU, Dropout, Embedding)
 
-from data import get_special_indices
-
 
 def setup_model_args(parser):
     """
@@ -49,8 +47,6 @@ def create_model(args, fields, device):
     Creates the sequence to sequence model.
     """
     SRC, TRG = fields
-    indices = get_special_indices(fields)
-
     tensor_indices = [
         torch.tensor(i).to(device) for i in indices]
 

@@ -27,7 +27,7 @@ from model import (
     setup_model_args)
 
 from data import (
-    create_datasets,
+    create_dataset,
     setup_data_args)
 
 from collections import OrderedDict
@@ -49,6 +49,9 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     LambdaLR)
+
+from torch.nn.parallel import (
+    DistributedDataParallel)
 
 from torchnlp.metrics.bleu import (
     get_moses_multi_bleu)
@@ -273,18 +276,27 @@ def main():
 
     # creating dataset and storing dataset splits
     # as individual variables for convenience
-    datasets, tokenizer = create_dataset(
+    datasets, tokenizers = create_dataset(
         args=args, device=device,
         distributed=distributed)
 
-    vocab_size = len(tokenizer)
+    source_tokenizer, target_tokenizer = tokenizers
+    source_vocab_size = len(source_tokenizer)
+    target_vocab_size = len(target_tokenizer)
 
     model = create_model(
-        args=args, vocab_size=vocab_size,
+        args=args, 
+        source_vocab_size=source_vocab_size,
+        target_vocab_size=target_vocab_size,
         device=device)
 
     optimizer = create_optimizer(
         args=args, parameters=model.parameters())
+
+    pad_idx = target_tokenizer.pad_id
+    criterion = create_criterion(
+        pad_idx=pad_idx, vocab_size=target_vocab_size,
+        device=device)
 
     # loading previous state of the training
     best_avg_acc, init_epoch, step = load_state(
@@ -323,9 +335,9 @@ def main():
         """
         Applies forward pass with the given batch.
         """
-        inputs, labels = batch
+        inputs, targets = batch
 
-        labels = convert_to_tensor(labels)
+        targets = convert_to_tensor(targets)
 
         # converting the batch of inputs to torch tensor
         inputs = [convert_to_tensor(m) for m in inputs]
@@ -342,7 +354,9 @@ def main():
 
         loss, accuracy = compute_loss(
             outputs=outputs,
-            labels=labels)
+            targets=targets,
+            criterion=criterion,
+            pad_idx=pad_idx)
 
         return loss, accuracy
 
@@ -488,7 +502,7 @@ def main():
                 loss=loss, acc=accuracy))
 
     bleu_score = compute_bleu(
-        hypotheses, references, tokenizer)
+        hypotheses, references, target_tokenizer)
 
     print('test bleu score: {:.4}'.format(bleu_score))
 
