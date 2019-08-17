@@ -141,7 +141,7 @@ def load_state(model_dir, model, optimizer, logger,
                 model_path))
 
         return (
-            state_dict['avg_loss'],
+            state_dict['val_loss'],
             state_dict['epoch'],
             state_dict['step']
         )
@@ -224,17 +224,17 @@ def create_criterion(pad_idx, vocab_size, device,
     return label_smoothing
 
 
-def compute_lr(step, factor=5e-2, warmup_steps=3):
+def compute_lr(step, factor=3e-3, warmup=50, eps=1e-7):
     """
     Calculates learning rate with warm up.
     """
-    if step < warmup_steps:
+    if step < warmup:
         return (1 + factor) ** step
     else:
         # after reaching maximum number of steps
         # the lr is decreased by factor as well
-        return ((1 + factor) ** warmup_steps) * \
-            ((1 - factor) ** (step - warmup_steps))
+        return max(((1 + factor) ** warmup) *
+                   ((1 - factor) ** (step - warmup)), eps)
 
 
 def compute_loss(outputs, targets, criterion, ignore_idx):
@@ -464,7 +464,7 @@ def main():
         state = {
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'avg_loss': val_loss,
+            'val_loss': val_loss,
             'epoch': epoch + 1,
             'step': step
         }
@@ -479,9 +479,7 @@ def main():
             except KeyboardInterrupt:
                 pass
 
-    scheduler = LambdaLR(
-        optimizer=optimizer, 
-        lr_lambda=compute_lr)
+    scheduler = LambdaLR(optimizer, compute_lr)
 
     if master_process:
         logger.info(str(vars(args)))
@@ -555,34 +553,43 @@ def main():
             logger.info('train loss: {:.4}'.format(
                 train_loss))
 
+        scheduler.step()
+
     writer.close()
 
-    test_loss = mean(evaluate(
-        dataset=test_dataset,
-        num_steps=num_test_steps))
+    loop = tqdm(
+        test_dataset(), 
+        total=num_test_steps,
+        disable=not master_process,
+        desc='Test')
 
     model.eval()
-    hypotheses, references = [], []
+    test_loss, hypotheses, references = [], [], []
 
     # running testing loop
     with torch.no_grad():
         for batch in loop:
-            loss, accuracy, outputs = forward_step(batch)
+            loss, acc, outputs = forward_step(batch)
 
             hypotheses.extend(outputs)
             references.extend(batch.trg)
 
             loop.set_postfix(ordered_dict=OrderedDict(
-                loss=loss, acc=accuracy))
+                loss=loss, acc=acc))
+
+            test_loss.append(loss)
+
+    test_loss = mean(test_loss)
 
     bleu_score = compute_bleu(
         hypotheses, references, target_tokenizer)
 
-    logger.info('test bleu score: {:.4}'.format(bleu_score))
-
     if master_process:
         logger.info('test loss: {:.4}'.format(
             test_loss))
+
+        logger.info('test bleu score: {:.4}'.format(
+            bleu_score))
 
 
 if __name__ == '__main__':

@@ -12,8 +12,6 @@
 import torch
 import random
 
-from numpy import inf
-
 from torch.nn.modules import (
     Module, ModuleList)
 
@@ -328,7 +326,8 @@ class Attention(Module):
         # NOTE during beam search mask might not be provided
         if attn_mask is not None:
             attn_scores = attn_scores.squeeze(1)
-            attn_scores.masked_fill_(attn_mask, -inf)
+            attn_scores.masked_fill_(
+                attn_mask, neginf(attn_scores.dtype))
             attn_scores = attn_scores.unsqueeze(1)
 
         attn_weights = softmax(attn_scores, dim=-1)

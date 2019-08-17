@@ -208,13 +208,13 @@ def compute_lines(filename):
         return sum(1 for _ in fh)
 
 
-def group_elements(iterable, group_size, fillvalue=None):
+def group_elements(iterable, group_size):
     """
     Collect data into fixed-length chunks.
     """
     groups = [iter(iterable)] * group_size
 
-    return zip_longest(*groups, fillvalue=fillvalue)
+    return zip_longest(*groups)
 
 
 def save_examples(args, data_path):
