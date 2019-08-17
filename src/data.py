@@ -93,11 +93,8 @@ def download(args):
     base_url = 'http://www.statmt.org/europarl/v7/'
     filename = 'de-en.tgz'
 
-    if not exists(args.download_dir):
-        os.mkdir(args.download_dir)
-
-    if not exists(args.data_dir):
-        os.mkdir(args.data_dir)
+    os.makedirs(args.data_dir, exist_ok=True)
+    os.makedirs(args.download_dir, exist_ok=True)
 
     url = base_url + filename
     download_path = join(args.download_dir, filename)
@@ -105,14 +102,18 @@ def download(args):
     if not exists(download_path):
         print('Downloading dataset to {}'.format(
             download_path))
+
         with requests.Session() as session:
             response = session.get(
                 url, stream=True, timeout=5)
 
-            loop = tqdm(response.iter_content(2 ** 15))
+            # data is read in 2 ** 15 sized chunks
+            # NOTE this could be tuned to reveal
+            # data size in MBs
+            loop = response.iter_content(2 ** 15)
 
             with open(download_path, 'wb') as f:
-                for chunk in loop:
+                for chunk in tqdm(loop):
                     if chunk:
                         f.write(chunk)
 
@@ -121,8 +122,7 @@ def download(args):
     target_file = join(args.data_dir,
                        'europarl-v7.de-en.de')
 
-    if not exists(source_file) or \
-            not exists(target_file):
+    if not exists(source_file) or not exists(target_file):
         print('Extracting dataset to {}'.format(
             args.data_dir))
         shutil.unpack_archive(
