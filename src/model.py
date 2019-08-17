@@ -64,6 +64,18 @@ def create_model(args, tokenizers, device):
     return model
 
 
+def neginf(dtype):
+    """
+    Return a representable finite 
+    number near -inf for a dtype.
+    """
+    if dtype is torch.float16:
+        return -65504
+    else:
+        return -1e20
+
+
+# NOTE currently unused function
 def embeddeding_dropout(embed, inputs, training, mask=None, p=0.1):
     """
     Applies dropout to the embedding layer based on
@@ -110,8 +122,7 @@ class Seq2Seq(Module):
         self.decoder = Decoder(
             input_size=embedding_size,
             hidden_size=hidden_size,
-            vocab_size=target_vocab_size,
-            num_softmax=15)
+            vocab_size=target_vocab_size)
 
     def forward(self, inputs, attn_mask=None, targets=None, 
                 max_len=50):
@@ -126,14 +137,6 @@ class Seq2Seq(Module):
         if attn_mask is None:
             attn_mask = inputs.eq(self.pad_idx)
 
-        # randomly masking input with unk during training
-        # which makes the model more robust to unks at testing
-        # NOTE unk dropout probability is hardcoded to be 0.1
-        if self.training:
-            unk_mask = torch.empty_like(inputs).bernoulli_(0.1)
-            unk_mask = unk_mask.byte() & inputs.ne(self.pad_idx)
-            inputs.masked_fill_(unk_mask, value=self.unk_idx)
-
         # the number of layers in the decoder must be equal
         # to the number of layers in the encoder because of
         # the initial hidden states from the encoder
@@ -141,14 +144,6 @@ class Seq2Seq(Module):
 
         scores = []
         preds = self.start_idx.detach().expand(batch_size, 1)
-
-        # precomputing embedding dropout mask
-        # NOTE embedding dropout is hardcoded 0.1
-        embed = self.decoder.embedding
-        embed_mask = embed.weight.new_empty(
-            (embed.weight.size(0), 1))
-        embed_mask.bernoulli_(0.9).expand_as(
-            embed.weight) / 0.9
 
         for idx in range(max_len):
             # if targets are provided and training then apply
@@ -163,8 +158,7 @@ class Seq2Seq(Module):
                 inputs=prev_output,
                 encoder_outputs=encoder_outputs,
                 prev_hiddens=hidden_states,
-                attn_mask=attn_mask,
-                embed_mask=embed_mask)
+                attn_mask=attn_mask)
 
             _, step_preds = step_scores.max(dim=-1)
 
@@ -191,7 +185,7 @@ class Encoder(Module):
             embedding_dim=input_size,
             padding_idx=pad_idx)
 
-        self.dropout = Dropout(p=0.3)
+        self.dropout = Dropout(p=0.1)
 
         self.merge = Linear(
             in_features=hidden_size * 2,
@@ -217,9 +211,6 @@ class Encoder(Module):
         """
         Computes the embeddings and runs them through an RNN.
         """
-        embedded = embeddeding_dropout(
-            embed=self.embedding, inputs=inputs, 
-            training=self.training)
         embedded = self.embedding(inputs)
         embedded = self.dropout(embedded)
 
@@ -243,19 +234,14 @@ class Decoder(Module):
     Decoder module for the seq2seq.
     """
 
-    def __init__(self, input_size, hidden_size, vocab_size,
-                 num_softmax):
+    def __init__(self, input_size, hidden_size, vocab_size):
         super().__init__()
-
-        self.num_softmax = num_softmax
-        self.input_size = input_size
-        self.vocab_size = vocab_size
 
         self.embedding = Embedding(
             num_embeddings=vocab_size,
             embedding_dim=input_size)
 
-        self.dropout = Dropout(p=0.3)
+        self.dropout = Dropout(p=0.1)
 
         self.rnn = ModuleList([
             GRU(input_size=input_size,
@@ -269,19 +255,6 @@ class Decoder(Module):
 
         self.attn = Attention(hidden_size=hidden_size)
 
-        # weight matrices for mixture of softmaxes
-        self.prior = Linear(
-            in_features=hidden_size,
-            out_features=num_softmax,
-            bias=False)
-
-        self.latent = Linear(
-            in_features=hidden_size,
-            out_features=num_softmax * input_size)
-
-        # initializing output layer like this
-        # instead of torch.nn.Linear so
-        # shared embedding can be implemented easily
         self.out_bias = Parameter(torch.zeros((vocab_size, )))
         self.out_weight = self.embedding.weight
 
@@ -292,9 +265,7 @@ class Decoder(Module):
         of sofmaxes and multi dropout during training.
         MoS implementation is taken from 
         """
-        embedded = embeddeding_dropout(
-            embed=self.embedding, inputs=inputs, 
-            training=self.training, mask=embed_mask)
+        embedded = self.embedding(inputs)
         output = self.dropout(embedded)
 
         hidden_states = []
@@ -312,26 +283,10 @@ class Decoder(Module):
             encoder_outputs=encoder_outputs,
             attn_mask=attn_mask)
 
-        latent = torch.tanh(self.latent(output))
-        latent = self.dropout(latent)
-        latent = latent.view(-1, self.input_size)
+        logits = linear(
+            output, self.out_weight, self.out_bias)
 
-        # computing softmaxes from contexts
-        context = linear(
-            latent, self.out_weight, self.out_bias)
-        softmaxes = softmax(context, dim=-1)
-        softmaxes = softmaxes.view(
-            -1, self.num_softmax, self.vocab_size)
-
-        # computing prior for softmax weighting
-        prior = self.prior(output).view(-1, self.num_softmax)
-        prior = softmax(prior, dim=-1).unsqueeze(2)
-
-        probs = (softmaxes * prior).sum(1).view(
-            inputs.size(0), 1, self.vocab_size)
-        # adding 1e-8 for numerical stability before
-        # transforming to log space
-        log_probs = probs.add_(1e-8).log()
+        log_probs = log_softmax(logits, dim=-1)
 
         return log_probs, hidden_states
 

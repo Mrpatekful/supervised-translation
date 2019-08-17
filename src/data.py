@@ -281,7 +281,7 @@ def generate_examples(lines):
 
 def generate_splits(args, data_files, splits):
     """
-    Creates from the downloaded WMT datafile.
+    Creates splits from the downloaded WMT datafile.
     """
     source_file, target_file = data_files
     data_size = compute_lines(source_file)
@@ -321,8 +321,7 @@ def read_file(args, data_path):
 
 
 def create_loader(args, filenames, tokenizers,
-                  distributed, shuffle=False,
-                  sampled=False):
+                  shuffle=False, sampled=False):
     """
     Creates a generator that iterates through the
     dataset.
@@ -330,7 +329,7 @@ def create_loader(args, filenames, tokenizers,
     # distributed training is used if the local
     # rank is not the default -1
     sampler_cls = DistributedSampler if \
-        distributed else IndexSampler
+        args.local_rank == -1 else IndexSampler
 
     bucket_sampler_cls = create_sampler_cls(
         sampler_cls=sampler_cls)
@@ -492,7 +491,7 @@ def create_sampler_cls(sampler_cls):
     return BucketSampler
 
 
-def create_dataset(args, device, distributed):
+def create_dataset(args, device):
     """
     Downloads the DailyDialog dataset, converts it
     to tokens and returns iterators over the train and
@@ -555,20 +554,17 @@ def create_dataset(args, device, distributed):
         args=args,
         filenames=train_files,
         tokenizers=tokenizers,
-        distributed=distributed,
         sampled=True,
         shuffle=True)
 
     valid_dataset = create_loader(
         args=args,
-        filenames=valid_files,
-        distributed=distributed,
+        filenames=test_files,
         tokenizers=tokenizers)
 
     test_dataset = create_loader(
         args=args,
         filenames=test_files,
-        distributed=distributed,
         tokenizers=tokenizers)
 
     train = train_dataset, train_size

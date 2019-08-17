@@ -5,10 +5,12 @@ chardet==3.0.4
 Cython==0.29.13
 idna==2.8
 isort==4.3.21
+joblib==0.13.2
 lazy-object-proxy==1.4.1
 mccabe==0.6.1
 numpy==1.17.0
 pandas==0.25.0
+protobuf==3.9.1
 pycodestyle==2.5.0
 pylint==2.3.1
 python-dateutil==2.8.0
@@ -17,6 +19,7 @@ pytz==2019.2
 requests==2.22.0
 sentencepiece==0.1.82
 six==1.12.0
+tensorboardX==1.8
 torch==1.1.0
 tqdm==4.32.2
 typed-ast==1.4.0

@@ -31,10 +31,12 @@ from data import (
     create_dataset,
     setup_data_args)
 
+from tensorboardX import SummaryWriter
 from collections import OrderedDict
 from tqdm import tqdm
 from math import ceil
 from datetime import datetime
+from statistics import mean
 
 try:
     from apex import amp
@@ -123,50 +125,29 @@ def setup_train_args():
     return parser.parse_args()
 
 
-def save_state(model, optimizer, avg_acc, epoch, step,
-               logger, path):
-    """
-    Saves the model and optimizer state.
-    """
-    model_path = join(path, 'model.pt')
-    state = {
-        'model': model.state_dict(),
-        'optimizer': optimizer.state_dict(),
-        'avg_acc': avg_acc,
-        'epoch': epoch,
-        'step': step
-    }
-    logger.info('Saving model to {}'.format(model_path))
-    # making sure the model saving is not left in a
-    # corrupted state after a keyboard interrupt
-    while True:
-        try:
-            torch.save(state, model_path)
-            break
-        except KeyboardInterrupt:
-            pass
-
-
-def load_state(model, optimizer, path, logger, device):
+def load_state(model_dir, model, optimizer, logger, 
+               device):
     """
     Loads the model and optimizer state.
     """
     try:
-        model_path = join(path, 'model.pt')
+        model_path = join(model_dir, 'model.pt')
         state_dict = torch.load(
             model_path, map_location=device)
 
         model.load_state_dict(state_dict['model'])
         optimizer.load_state_dict(state_dict['optimizer'])
-        logger.info('Loading model from {}'.format(model_path))
+        logger.info('Loading model from {}'.format(
+                model_path))
+
         return (
-            state_dict['avg_acc'],
+            state_dict['avg_loss'],
             state_dict['epoch'],
             state_dict['step']
         )
 
     except FileNotFoundError:
-        return 0, 0, 0
+        return np.inf, 0, 0
 
 
 def create_logger(args):
@@ -256,22 +237,28 @@ def compute_lr(step, factor=5e-2, warmup_steps=3):
             ((1 - factor) ** (step - warmup_steps))
 
 
-def compute_loss(outputs, targets, criterion, pad_idx):
+def compute_loss(outputs, targets, criterion, ignore_idx):
     """
     Computes the loss and accuracy with masking.
     """
-    scores, preds = outputs
-    scores_view = scores.view(-1, scores.size(-1))
+    log_probs = outputs[0]
+
+    log_probs_view = log_probs.view(-1, log_probs.size(-1))
     targets_view = targets.view(-1)
 
-    loss = criterion(scores_view, targets_view)
+    loss = criterion(log_probs_view, targets_view)
 
-    # computing accuracy without including the pad tokens
-    notpad = targets.ne(pad_idx)
-    target_tokens = notpad.long().sum().item()
-    correct = ((targets == preds) * notpad).sum().item()
+    _, preds = log_probs.max(dim=-1)
+
+    # computing accuracy without including the
+    # values at the ignore indices
+    not_ignore = targets_view.ne(ignore_idx)
+    target_tokens = not_ignore.long().sum().item()
+    
+    correct = (targets_view == preds) * not_ignore
+    correct = correct.sum().item()
+
     accuracy = correct / target_tokens
-
     loss = loss / target_tokens
 
     return loss, accuracy
@@ -294,12 +281,9 @@ def main():
     Performs training, validation and testing.
     """
     args = setup_train_args()
-    distributed = args.local_rank != -1
     master_process = args.local_rank in [0, -1]
 
-    logger = create_logger(args)
-
-    if distributed and args.cuda:
+    if args.local_rank != -1 and args.cuda:
         # use distributed training if local rank is given
         # and GPU training is requested
         torch.cuda.set_device(args.local_rank)
@@ -315,8 +299,7 @@ def main():
     # creating dataset and storing dataset splits
     # as individual variables for convenience
     datasets, tokenizers = create_dataset(
-        args=args, device=device,
-        distributed=distributed)
+        args=args, device=device)
 
     _, target_tokenizer = tokenizers
     target_vocab_size = len(target_tokenizer)
@@ -328,29 +311,39 @@ def main():
     optimizer = create_optimizer(
         args=args, parameters=model.parameters())
 
+    writer = SummaryWriter(
+        logdir=args.model_dir,
+        flush_secs=100)
+
+    logger = create_logger(args=args)
+
     pad_idx = target_tokenizer.pad_id()
+
     criterion = create_criterion(
         pad_idx=pad_idx, vocab_size=target_vocab_size,
         device=device)
 
     # loading previous state of the training
-    best_avg_acc, init_epoch, step = load_state(
-        model=model, optimizer=optimizer,
-        path=args.model_dir, logger=logger,
+    best_val_loss, init_epoch, step = load_state(
+        model_dir=args.model_dir, model=model, 
+        optimizer=optimizer, logger=logger,
         device=device)
 
     if args.mixed and args.cuda:
         model, optimizer = amp.initialize(
             model, optimizer, opt_level='O2')
 
-    if distributed:
+    if args.local_rank != -1:
         model = DistributedDataParallel(
             model, device_ids=[args.local_rank], 
             output_device=args.local_rank)
 
-    # TODO get world size here instead of 1
+    world_size = 1 if not args.cuda \
+        else torch.cuda.device_count()
+
     train, valid, test = [
-        (split, ceil(size / args.batch_size / 1)) 
+        (split, ceil(
+            size / args.batch_size / world_size)) 
         for split, size in datasets]
 
     # computing the sizes of the dataset splits
@@ -385,9 +378,9 @@ def main():
             outputs=outputs,
             targets=targets,
             criterion=criterion,
-            pad_idx=pad_idx)
+            ignore_idx=pad_idx)
 
-        return loss, accuracy
+        return loss, accuracy, outputs
 
     def train_step(batch):
         """
@@ -395,7 +388,7 @@ def main():
         """
         nonlocal step
 
-        loss, accuracy = forward_step(batch)
+        loss, accuracy, _ = forward_step(batch)
 
         if torch.isnan(loss).item():
             if master_process:
@@ -440,90 +433,133 @@ def main():
         else:
             clip_grad_norm_(model.parameters(), max_norm)
 
+    @torch.no_grad()
+    def evaluate(dataset, num_steps):
+        """
+        Constructs a validation loader and evaluates
+        the model.
+        """
+        loop = tqdm(
+            dataset(), 
+            total=num_steps,
+            disable=not master_process,
+            desc='Eval')
+
+        model.eval()
+
+        for batch in loop:
+            loss, acc, _ = forward_step(batch)
+
+            loop.set_postfix(ordered_dict=OrderedDict(
+                loss=loss.item(), acc=acc))
+
+            yield loss.item()
+
+    def save_state():
+        """
+        Saves the model and optimizer state.
+        """
+        model_path = join(args.model_dir, 'model.pt')
+
+        state = {
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'avg_loss': val_loss,
+            'epoch': epoch + 1,
+            'step': step
+        }
+        
+        logger.info('Saving model to {}'.format(model_path))
+        # making sure the model saving is not left in a
+        # corrupted state after a keyboard interrupt
+        while True:
+            try:
+                torch.save(state, model_path)
+                break
+            except KeyboardInterrupt:
+                pass
+
     scheduler = LambdaLR(
         optimizer=optimizer, 
         lr_lambda=compute_lr)
 
     if master_process:
         logger.info(str(vars(args)))
-        
+
     for epoch in range(init_epoch, args.max_epochs):
         # running training loop
         loop = tqdm(
             train_dataset(), 
             total=num_train_steps,
-            disable=not master_process)
+            disable=not master_process,
+            desc='Train {}'.format(epoch))
 
-        loop.set_description('{}'.format(epoch))
+        train_loss = []
+
         model.train()
-        avg_acc = []
 
         for batch in loop:
             try:
-                loss, accuracy = train_step(batch)
+                loss, acc = train_step(batch)
 
-                if accuracy is not None:
-                    avg_acc.append(accuracy)
+                if master_process and loss is not None:
+                    train_loss.append(loss)
+
+                    # logging to tensorboard    
+                    writer.add_scalar('train/loss', loss, step)
+                    writer.add_scalar('train/acc', acc, step)
 
                 loop.set_postfix(ordered_dict=OrderedDict(
-                    loss=loss, acc=accuracy))
+                    loss=loss, acc=acc))
+
+                if not step % args.eval_every_step:
+                    val_loss = mean(evaluate(
+                        dataset=valid_dataset,
+                        num_steps=num_valid_steps))
+                    
+                    # switching back to training
+                    model.train()
+
+                    if master_process:
+                        logger.info('val loss: {:.4}'.format(
+                            val_loss))
+
+                        # logging to tensorboard    
+                        writer.add_scalar('val/loss', loss, step)
+                        writer.add_scalar('val/acc', acc, step)
+
+                    if val_loss < best_val_loss:
+                        patience = 0
+                        best_val_loss = val_loss
+
+                        if master_process:
+                            save_state()
+
+                    else:
+                        patience += 1
+                        if patience == args.patience:
+                            # terminate when max patience 
+                            # level is hit
+                            break
 
             except RuntimeError as e:
                 if 'out of memory' in str(e):
                     logger.warn('skipping step (oom)')
-        
-        scheduler.step(epoch=epoch)
 
-        if len(avg_acc) > 0:
-            avg_acc = sum(avg_acc) / len(avg_acc)
+        if len(train_loss) > 0:
+            train_loss = mean(train_loss)
         else:
-            avg_acc = 0.0
+            train_loss = 0.0
 
         if master_process:
-            logger.info('avg train acc: {:.4}'.format(avg_acc))
+            logger.info('train loss: {:.4}'.format(
+                train_loss))
 
-        loop = tqdm(
-            valid_dataset(), 
-            total=num_valid_steps,
-            disable=not master_process)
+    writer.close()
 
-        model.eval()
-        avg_acc = []
-
-        # running validation loop
-        with torch.no_grad():
-            for batch in loop:
-                loss, accuracy = forward_step(batch)
-
-                avg_acc.append(accuracy)
-
-                loop.set_postfix(ordered_dict=OrderedDict(
-                    loss=loss.item(), acc=accuracy))
-
-            avg_acc = sum(avg_acc) / len(avg_acc)
-
-        if master_process:
-            logger.warn('avg valid acc: {:.4}'.format(avg_acc))
-
-        if avg_acc > best_avg_acc:
-            patience = 0
-            best_avg_acc = avg_acc
-            if master_process:
-                save_state(
-                    model=model, optimizer=optimizer,
-                    avg_acc=best_avg_acc, epoch=epoch + 1,
-                    step=step, logger=logger,
-                    path=args.model_dir)
-
-        else:
-            patience += 1
-            if patience == args.patience:
-                break
-
-    loop = tqdm(
-        test_dataset(), 
-        total=num_test_steps,
-        disable=not master_process)
+    test_loss = mean(evaluate(
+        dataset=test_dataset,
+        num_steps=num_test_steps))
 
     model.eval()
     hypotheses, references = [], []
@@ -543,6 +579,10 @@ def main():
         hypotheses, references, target_tokenizer)
 
     logger.info('test bleu score: {:.4}'.format(bleu_score))
+
+    if master_process:
+        logger.info('test loss: {:.4}'.format(
+            test_loss))
 
 
 if __name__ == '__main__':
