@@ -117,10 +117,10 @@ def download(args):
                     if chunk:
                         f.write(chunk)
 
-    source_file = join(args.data_dir,
-                       'europarl-v7.de-en.en')
-    target_file = join(args.data_dir,
-                       'europarl-v7.de-en.de')
+    source_file = join(
+        args.data_dir, 'europarl-v7.de-en.en')
+    target_file = join(
+        args.data_dir, 'europarl-v7.de-en.de')
 
     if not exists(source_file) or not exists(target_file):
         print('Extracting dataset to {}'.format(
@@ -140,45 +140,7 @@ def download(args):
     return source_file, target_file
 
 
-def create_tokenizer(args, prefix, data_path):
-    """
-    Creates tokenizers from raw datafiles.
-    """
-    tokenizer_path = join(args.data_dir, prefix)
-
-    if not exists(tokenizer_path + '.model'):
-        param_string = ' '.join([
-            '--input={data_path}',
-            '--vocab_size={vocab_size}',
-            '--model_prefix={prefix}',
-            '--pad_id=0',
-            '--pad_piece={pad}',
-            '--unk_id=1',
-            '--unk_piece={unk}',
-            '--bos_id=2',
-            '--bos_piece={sos}',
-            '--eos_id=3',
-            '--eos_piece={eos}',
-            '--num_threads=4',
-            '--input_sentence_size={max_sent}'
-            '--shuffle_input_sentence=True'
-        ]).format(
-            data_path=data_path,
-            vocab_size=args.vocab_size,
-            prefix=tokenizer_path,
-            max_sent=args.max_sentences,
-            pad=PAD, unk=UNK,
-            sos=SOS, eos=EOS)
-
-        spm.SentencePieceTrainer.train(param_string)
-
-    tokenizer = spm.SentencePieceProcessor()
-    tokenizer.load(tokenizer_path + '.model')
-
-    return tokenizer
-
-
-def transform(args, data_files):
+def transform_dataset(args, data_files):
     """
     Transforms the dataset splits and smaller
     binary datafiles.
@@ -192,8 +154,8 @@ def transform(args, data_files):
     ]
 
     train, valid, test = [
-        (save_examples(args=args,
-                       data_path=filename), size)
+        (save_examples(
+            args=args, data_path=filename), size)
         for filename, size in
         generate_splits(args, data_files, splits)]
 
@@ -253,12 +215,12 @@ def save_lines(dump_path, line_generator):
             f.write('\t'.join(line) + '\n')
 
 
-def generate_lines(file_handle, num_lines):
+def generate_elements(iterable, num_elements):
     """
     Generates `data_length` number of lines from a file.
     """
-    for _, line in zip(range(num_lines), file_handle):
-        yield line
+    for _, element in zip(range(num_elements), iterable):
+        yield element
 
 
 def generate_examples(lines):
@@ -295,9 +257,9 @@ def generate_splits(args, data_files, splits):
         dump_path = join(args.data_dir, filename)
 
         line_generator = tqdm(
-            generate_lines(
-                file_handle=data_files,
-                num_lines=num_lines))
+            generate_elements(
+                iterable=data_files,
+                num_elements=num_lines))
 
         save_lines(
             dump_path=dump_path,
@@ -318,53 +280,6 @@ def read_file(args, data_path):
                     line = line.lower()
 
                 yield line
-
-
-def create_loader(args, filenames, tokenizers,
-                  shuffle=False, sampled=False):
-    """
-    Creates a generator that iterates through the
-    dataset.
-    """
-    # distributed training is used if the local
-    # rank is not the default -1
-    sampler_cls = DistributedSampler if \
-        args.local_rank == -1 else IndexSampler
-
-    bucket_sampler_cls = create_sampler_cls(
-        sampler_cls=sampler_cls)
-
-    def load_examples():
-        """
-        Generator that loads examples from files
-        lazily.
-        """
-        file_dataset = FileDataset(
-            filenames,
-            tokenizers=tokenizers,
-            sampled=sampled)
-
-        file_loader = DataLoader(
-            file_dataset,
-            collate_fn=lambda x: x[0])
-
-        for examples in file_loader:
-            sampler = bucket_sampler_cls(
-                examples, shuffle=shuffle)
-
-            translation_dataset = TranslationDataset(
-                examples=examples)
-
-            example_loader = DataLoader(
-                translation_dataset,
-                batch_size=args.batch_size,
-                num_workers=4, sampler=sampler,
-                pin_memory=True,
-                collate_fn=padded_collate)
-
-            yield from example_loader
-
-    return load_examples
 
 
 class FileDataset(Dataset):
@@ -449,46 +364,89 @@ class IndexSampler(Sampler):
         return len(self.data_source)
 
 
-def create_sampler_cls(sampler_cls):
+def create_loader(args, filenames, tokenizers,
+                  shuffle=False, sampled=False):
     """
-    Creates a bucketized sampler class.
+    Creates a generator that iterates through the
+    dataset.
     """
-    class BucketSampler(sampler_cls):
+    # distributed training is used if the local
+    # rank is not the default -1
+    sampler_cls = DistributedSampler if \
+        args.local_rank == -1 else IndexSampler
+
+    bucket_sampler_cls = create_sampler_cls(
+        sampler_cls=sampler_cls)
+
+    def load_examples():
         """
-        Bucketized sampler that yields exclusive groups
-        of indices based on the sequence length.
+        Generator that loads examples from files
+        lazily.
         """
+        file_dataset = FileDataset(
+            filenames,
+            tokenizers=tokenizers,
+            sampled=sampled)
 
-        def __init__(self, data_source, bucket_size=1000,
-                     shuffle=True):
-            super().__init__(data_source)
-            self.bucket_size = bucket_size
-            self.shuffle = shuffle
+        file_loader = DataLoader(
+            file_dataset,
+            collate_fn=lambda x: x[0])
 
-            self.sorted = sorted(
-                list(super().__iter__()),
-                key=lambda i: (
-                    len(data_source[i][0]),
-                    len(data_source[i][1])))
+        for examples in file_loader:
+            sampler = bucket_sampler_cls(
+                examples, shuffle=shuffle)
 
-        def __iter__(self):
-            # divides the data into bucket size segments
-            # and only these segment are shuffled
-            segments = [
-                self.sorted[idx: idx + self.bucket_size]
-                for idx in range(0, len(self.sorted),
-                                 self.bucket_size)]
+            translation_dataset = TranslationDataset(
+                examples=examples)
 
-            # selecting segements in random order
-            random.shuffle(segments)
-            for segment in segments:
+            example_loader = DataLoader(
+                translation_dataset,
+                batch_size=args.batch_size,
+                num_workers=4, sampler=sampler,
+                pin_memory=True,
+                collate_fn=padded_collate)
 
-                if self.shuffle:
-                    random.shuffle(segment)
+            yield from example_loader
 
-                yield from segment
+    return load_examples
 
-    return BucketSampler
+
+def create_tokenizer(args, prefix, data_path):
+    """
+    Creates tokenizers from raw datafiles.
+    """
+    tokenizer_path = join(args.data_dir, prefix)
+
+    if not exists(tokenizer_path + '.model'):
+        param_string = ' '.join([
+            '--input={data_path}',
+            '--vocab_size={vocab_size}',
+            '--model_prefix={prefix}',
+            '--pad_id=0',
+            '--pad_piece={pad}',
+            '--unk_id=1',
+            '--unk_piece={unk}',
+            '--bos_id=2',
+            '--bos_piece={sos}',
+            '--eos_id=3',
+            '--eos_piece={eos}',
+            '--num_threads=4',
+            '--input_sentence_size={max_sent}'
+            '--shuffle_input_sentence=True'
+        ]).format(
+            data_path=data_path,
+            vocab_size=args.vocab_size,
+            prefix=tokenizer_path,
+            max_sent=args.max_sentences,
+            pad=PAD, unk=UNK,
+            sos=SOS, eos=EOS)
+
+        spm.SentencePieceTrainer.train(param_string)
+
+    tokenizer = spm.SentencePieceProcessor()
+    tokenizer.load(tokenizer_path + '.model')
+
+    return tokenizer
 
 
 def create_dataset(args, device):
@@ -518,7 +476,8 @@ def create_dataset(args, device):
         # if dataset does not exist then create it
         # downloading and tokenizing the raw files
         data_files = source_file, target_file
-        train, valid, test = transform(args, data_files)
+        train, valid, test = transform_dataset(
+            args=args, data_files=data_files)
 
         train_files, train_size = train
         valid_files, valid_size = valid
@@ -572,3 +531,45 @@ def create_dataset(args, device):
     test = test_dataset, test_size
 
     return (train, valid, test), tokenizers
+
+
+def create_sampler_cls(sampler_cls):
+    """
+    Creates a bucketized sampler class.
+    """
+    class BucketSampler(sampler_cls):
+        """
+        Bucketized sampler that yields exclusive groups
+        of indices based on the sequence length.
+        """
+
+        def __init__(self, data_source, bucket_size=1000,
+                     shuffle=True):
+            super().__init__(data_source)
+            self.bucket_size = bucket_size
+            self.shuffle = shuffle
+
+            self.sorted = sorted(
+                list(super().__iter__()),
+                key=lambda i: (
+                    len(data_source[i][0]),
+                    len(data_source[i][1])))
+
+        def __iter__(self):
+            # divides the data into bucket size segments
+            # and only these segment are shuffled
+            segments = [
+                self.sorted[idx: idx + self.bucket_size]
+                for idx in range(0, len(self.sorted),
+                                 self.bucket_size)]
+
+            # selecting segements in random order
+            random.shuffle(segments)
+            for segment in segments:
+
+                if self.shuffle:
+                    random.shuffle(segment)
+
+                yield from segment
+
+    return BucketSampler

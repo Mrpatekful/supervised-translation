@@ -16,6 +16,8 @@ import cython
 from libcpp.vector cimport vector
 from libcpp cimport bool
 
+from libc.stdint cimport int32_t
+
 
 def padded_collate(vector[vector[vector[int]]] examples):
     """
